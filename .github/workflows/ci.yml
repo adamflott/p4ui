@@ -1,0 +1,57 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Validate packaging helpers
+        if: runner.os == 'Linux'
+        run: |
+          python3 tests/packaging.py
+          bash -n scripts/vendor-source.sh packaging/arch/PKGBUILD.in
+      - run: cargo build --locked --release
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: cargo check --locked --all-targets
+  perforce:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [r24.2, r26.1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install isolated-test tools
+        env:
+          P4_RELEASE: ${{ matrix.release }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/p4-bin"
+          for tool in p4 p4d; do
+            curl --fail --silent --show-error --location --retry 3 "https://ftp.perforce.com/perforce/$P4_RELEASE/bin.linux26x86_64/$tool" -o "$RUNNER_TEMP/p4-bin/$tool"
+            chmod +x "$RUNNER_TEMP/p4-bin/$tool"
+          done
+          echo "$RUNNER_TEMP/p4-bin" >> "$GITHUB_PATH"
+      - run: cargo test --locked --test perforce -- --ignored
+      - run: cargo build --locked
+      - run: python3 tests/ui_smoke.py

@@ -1,0 +1,88 @@
+name: Packages
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deb:
+    name: Debian / Ubuntu (x86_64)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git curl ca-certificates debhelper dpkg-dev fakeroot python3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assemble locked vendored source
+        run: ./scripts/vendor-source.sh
+      - name: Build and inspect package
+        run: |
+          mkdir -p dist/deb-build
+          tar -xzf dist/p4ui-*.tar.gz -C dist/deb-build
+          cd dist/deb-build/p4ui-*
+          dpkg-buildpackage -d -us -uc -b
+          cd ..
+          dpkg-deb --info p4ui_*.deb
+          dpkg -i p4ui_*.deb
+          p4ui --version
+          cp p4ui_*.deb "$GITHUB_WORKSPACE/dist/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4ui-deb-x86_64
+          path: dist/*.deb
+          if-no-files-found: error
+  rpm:
+    name: Fedora RPM (x86_64)
+    runs-on: ubuntu-latest
+    container: fedora:43
+    steps:
+      - name: Install build tools
+        run: dnf install -y gcc git cargo rust rpm-build python3 tar gzip findutils
+      - uses: actions/checkout@v4
+      - name: Assemble locked vendored source
+        run: ./scripts/vendor-source.sh
+      - name: Build and inspect package
+        run: |
+          mkdir -p dist/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          cp dist/p4ui-*.tar.gz dist/rpmbuild/SOURCES/
+          cp packaging/rpm/p4ui.spec dist/rpmbuild/SPECS/
+          rpmbuild -ba --define "_topdir $PWD/dist/rpmbuild" dist/rpmbuild/SPECS/p4ui.spec
+          rpm -qip dist/rpmbuild/RPMS/*/p4ui-*.rpm
+          dnf install -y dist/rpmbuild/RPMS/*/p4ui-*.rpm
+          p4ui --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4ui-rpm-x86_64
+          path: |
+            dist/rpmbuild/RPMS/**/*.rpm
+            dist/rpmbuild/SRPMS/*.rpm
+          if-no-files-found: error
+  arch:
+    name: Arch Linux (x86_64)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git rust python
+      - uses: actions/checkout@v4
+      - name: Assemble locked vendored source
+        run: ./scripts/vendor-source.sh
+      - name: Build and inspect package as an unprivileged user
+        run: |
+          python3 scripts/prepare-arch.py dist/p4ui-*.tar.gz "$RUNNER_TEMP/arch-build"
+          useradd --create-home builder
+          chown -R builder:builder "$RUNNER_TEMP/arch-build"
+          runuser -u builder -- bash -c 'cd "$1" && makepkg --noconfirm' _ "$RUNNER_TEMP/arch-build"
+          pacman -U --noconfirm "$RUNNER_TEMP"/arch-build/p4ui-*.pkg.tar.zst
+          p4ui --version
+          cp "$RUNNER_TEMP"/arch-build/p4ui-*.pkg.tar.zst dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4ui-arch-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error

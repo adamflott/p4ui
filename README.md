@@ -1,0 +1,103 @@
+# p4ui
+
+A keyboard-driven terminal interface for Perforce, inspired by [gitui](https://github.com/gitui-org/gitui). It brings a familiar tab bar, two status lists, a colored diff pane, contextual commands, and keyboard navigation to Perforce workspaces.
+
+![p4ui status view, rendered from a sample workspace](docs/status.svg)
+
+**Status: early release.** The core workflows have real `p4`/`p4d` integration tests, including conflicting edits and stream integration. This is a new application, not a claim of gitui's maturity or complete feature parity. See [feature mapping and remaining gaps](docs/PARITY.md) and [validation](docs/TESTING.md).
+
+## Install and run
+
+Requirements: Rust 1.88 or newer, the Perforce `p4` client supporting tagged JSON (`-ztag -Mj`), and an existing workspace. Development is tested locally with P4/P4D 2026.1 on macOS ARM64. A daemon is only needed to run the server integration tests; it is not bundled or started during normal use.
+
+```sh
+cargo install --path . --locked
+cd /path/to/your/perforce/workspace
+p4 login                   # if required by your server
+p4ui
+```
+
+Or run directly:
+
+```sh
+cargo run --release -- -d /path/to/workspace
+p4ui -p ssl:perforce.example.com:1666 -u alice -c alice-workspace
+p4ui --check               # connection/workspace diagnostics
+p4ui --status              # machine-readable workspace status, no TTY needed
+p4ui --help
+```
+
+`P4CONFIG`, `P4PORT`, `P4USER`, `P4CLIENT`, `P4CHARSET`, trust, ignore rules, and login tickets use the normal `p4` configuration. Explicit connection flags override those settings. Authentication/SSO, trust enrollment, server administration, and workspace creation remain in the `p4` CLI. No passwords are accepted on p4ui's command line or stored in its configuration.
+
+Run from the workspace root to operate on the whole workspace. Status, history, files, sync, reconcile, merge, and copy use the current directory and its descendants. **Submit and shelve operate on the entire changelist**, including files outside that directory. Enter on a pending changelist shows its complete file list.
+
+## Build and native packages
+
+See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Package workflows upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). These are upstream packages; availability in official distro repositories is tracked separately.
+
+## Workflow
+
+1. In **Status**, select an offline/untracked file and press `Space` or `a` to reconcile it. `A` reconciles all files in scope after confirmation. `p4 ignore` rules are honored through the client's usual configuration.
+2. For tracked files, use **Files**, press `e` to open for edit, or `o` to open for edit and launch your editor. Editor selection is `P4EDITOR`, `VISUAL`, `EDITOR`, then `vi` (`notepad` on Windows). Commands with quoted arguments are supported; shell pipelines/expansion are not evaluated.
+3. In **Changes**, press `n` to create a numbered changelist. Select it and press `Space` to make it the target for subsequent file actions. In Status, `m` moves an opened file to a chosen changelist.
+4. Press `c` to submit. The default changelist asks for a description; numbered changelists use their saved description (`E` edits it). Multiline inputs use Enter for a newline and **Ctrl-S** to accept. All submissions require explicit `y` confirmation.
+5. Use **Log** to inspect submitted changes. Enter drills into the file list; select a file for its revision-specific diff. `Esc` returns. Shelves and pending changes support the same drilldown.
+6. `s` in Changes shelves a numbered changelist. Shelving keeps the files open; revert separately when ready. `u` in Shelves unshelves into a chosen pending change. Existing shelf content is never force-overwritten.
+7. `f` syncs to depot HEAD after confirmation. **Resolve** lists unresolved files; `R` chooses safe automatic resolve, merge, yours, or theirs. Conflicts left by auto resolve require your merge tool and `p4 resolve`.
+
+The result of a failed submit can be a newly numbered pending changelist. Refresh and inspect Changes before retrying. Timeouts and interrupted network operations also require inspection; server changes are not assumed to be rolled back.
+
+## Keys
+
+`?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, `+` increases the server query limit, `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
+
+| Tab | Commands |
+| --- | --- |
+| Status | `a` / Space reconcile or reopen to target; `A` reconcile all; `o` editor; `m` move to changelist; `u` metadata revert, keep content; `U` discard/revert |
+| Log | Enter browse files; `b` annotate revision; `h` file/integration history |
+| Changes | `n` new; Space target; Enter files; `E` edit description; `s` shelve; `c` submit; `D` delete empty change |
+| Shelves | Enter files; `u` unshelve; `D` delete shelf |
+| Files | `e` open for edit; `o` editor; `b` annotate; `h` history; `v` inspect revision; `D` open for delete; `M` move; `L` lock / `l` unlock |
+| Streams | `o` / Space switch; `n` create; `D` delete spec; `g` merge from selected; `p` copy from selected |
+| Resolve | `R` resolve (`-am`, `-as`, `-ay`, `-at`) |
+| Workspaces | `o` / Space select local workspace for this session |
+| Labels | Inspect label specifications and filter the list |
+
+`U`, delete, sync, submit, unshelve, integration, and switching require confirmation. Enter never accepts a destructive confirmation: press `y` explicitly.
+
+Stream commands require a stream workspace and follow server flow/permission rules. Creation makes a development child of the **current** stream, or a mainline when no current stream is set; a stream depot must already exist. Creating the specification does not populate files. Switch to it, select the parent, merge (`g`) to populate a development stream, resolve, inspect, and submit. Copy (`p`) promotes development to its parent after incoming changes have been merged. Stream deletion removes the specification, not submitted history. Stream paths cannot be renamed as though they were Git branch references.
+
+## Configuration
+
+The default path is `$XDG_CONFIG_HOME/p4ui/config.toml` or `~/.config/p4ui/config.toml`; on Windows, `%APPDATA%/p4ui/config.toml`. Use `--config path` to override. Missing default configuration is fine; unknown fields, unsupported themes, and conflicting key bindings are errors.
+
+```toml
+refresh_seconds = 10          # 0 disables automatic refresh
+command_timeout_seconds = 120 # 1..3600, including submits and large syncs
+max_output_mb = 16            # 1..256 per command/preview
+page_size = 200               # 10..10000; + raises it for the current session
+theme = "dark"               # dark, light, mono
+
+[keys]
+quit = "Q"
+# Single characters; arrow/navigation keys remain available.
+```
+
+Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
+
+## Development
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo test --locked --test perforce -- --ignored
+cargo build --locked
+python3 tests/ui_smoke.py
+```
+
+Integration fixtures use isolated temporary servers via the local `rsh:` transport. They do not connect to your server or listen on a network port. Their security overrides apply **only to their temporary databases**, which are deleted after each test. Python 3 is needed for process-boundary tests and the Unix PTY smoke test. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License and credit
+
+MIT. The interface and workflow are inspired by gitui; this implementation is original Rust code using Ratatui and Crossterm, rather than a fork of gitui's Git backend. Perforce, P4, and gitui belong to their respective owners. This is an independent project.

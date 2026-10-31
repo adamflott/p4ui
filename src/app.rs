@@ -1,0 +1,822 @@
+use crate::{config::Config, model::*, p4::Connection};
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+#[derive(Debug, Clone)]
+pub enum InputKind {
+    NewChange,
+    NewStream(String),
+    EditChange(String),
+    SubmitDefault,
+    Reopen(FileEntry),
+    Unshelve(String),
+    Move(FileEntry),
+    Revision(FileEntry),
+    Resolve(FileEntry),
+}
+impl InputKind {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::NewChange => "New changelist description",
+            Self::NewStream(_) => "Create stream — full //depot/stream path",
+            Self::EditChange(_) => "Edit changelist description",
+            Self::SubmitDefault => "Submit DEFAULT changelist — description",
+            Self::Reopen(_) => "Move file to changelist (number or default)",
+            Self::Unshelve(_) => "Unshelve into changelist (number or default)",
+            Self::Move(_) => "Move opened file — destination local path",
+            Self::Revision(_) => "View depot revision — positive revision number",
+            Self::Resolve(_) => "Resolve mode: -am merge, -as safe, -ay yours, -at theirs",
+        }
+    }
+    pub fn multiline(&self) -> bool {
+        matches!(
+            self,
+            Self::NewChange | Self::EditChange(_) | Self::SubmitDefault
+        )
+    }
+}
+#[derive(Debug, Clone)]
+pub enum Popup {
+    Help,
+    Message { title: String, text: String },
+    Input { kind: InputKind, value: String },
+    Confirm { action: Action, text: String },
+}
+
+enum Request {
+    Load(Tab, usize),
+    ChangeFiles(String, Tab),
+    Detail(String, Detail),
+    Act(Action),
+    Edit(FileEntry, String),
+}
+enum Response {
+    Load(Tab, Result<View>),
+    ChangeFiles(String, Tab, Result<View>),
+    Detail(String, Result<String>),
+    Act(Result<String>),
+    Edit(Result<std::path::PathBuf>),
+}
+struct Worker {
+    send: Sender<Request>,
+    receive: Receiver<Response>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        let (dummy, _) = mpsc::channel();
+        drop(std::mem::replace(&mut self.send, dummy));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+impl Worker {
+    fn new(mut connection: Connection) -> Self {
+        let (send, jobs) = mpsc::channel();
+        let (results, receive) = mpsc::channel();
+        let cancel = connection.cancelled.clone();
+        let handle = thread::spawn(move || {
+            while let Ok(job) = jobs.recv() {
+                let result = match job {
+                    Request::Load(tab, limit) => Response::Load(tab, connection.load(tab, limit)),
+                    Request::ChangeFiles(id, tab) => {
+                        Response::ChangeFiles(id.clone(), tab, connection.change_files(&id, tab))
+                    }
+                    Request::Detail(key, detail) => {
+                        Response::Detail(key, connection.detail(detail))
+                    }
+                    Request::Act(action) => Response::Act(connection.act(action)),
+                    Request::Edit(file, target) => Response::Edit((|| {
+                        let meta = std::fs::symlink_metadata(&file.local)?;
+                        anyhow::ensure!(
+                            meta.is_file(),
+                            "Only regular local files can be opened in an editor"
+                        );
+                        if !file.opened {
+                            connection.act(if file.action == "add" {
+                                Action::Reconcile(Some(file.clone()), target)
+                            } else {
+                                Action::Edit(file.clone(), target)
+                            })?;
+                        }
+                        Ok(std::path::PathBuf::from(file.local))
+                    })()),
+                };
+                if results.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            send,
+            receive,
+            cancel,
+            handle: Some(handle),
+        }
+    }
+}
+
+pub struct App {
+    pub config: Config,
+    pub tab: Tab,
+    pub view: View,
+    pub selected: usize,
+    pub filter: String,
+    pub searching: bool,
+    pub detail: String,
+    pub detail_title: String,
+    pub detail_scroll: (u16, u16),
+    pub popup_scroll: u16,
+    pub focus_detail: bool,
+    pub popup: Option<Popup>,
+    pub status: String,
+    pub busy: bool,
+    pub quit: bool,
+    pub mutating: bool,
+    pub external_edit: Option<std::path::PathBuf>,
+    pub target: String,
+    pub limit: usize,
+    pub drill: Option<String>,
+    parent: Option<(Vec<Item>, usize)>,
+    pub last_refresh: Instant,
+    worker: Option<Worker>,
+    refresh_needed: bool,
+    detail_needed: bool,
+    selection_changed: Instant,
+}
+impl App {
+    pub fn new(config: Config, connection: Connection) -> Self {
+        let mut app = Self::for_view(config, View::default());
+        app.worker = Some(Worker::new(connection));
+        app.refresh_needed = true;
+        app
+    }
+    /// Also useful for rendering deterministic offline snapshots.
+    pub fn for_view(config: Config, view: View) -> Self {
+        let limit = config.page_size;
+        Self {
+            config,
+            tab: Tab::Status,
+            view,
+            selected: 0,
+            filter: String::new(),
+            searching: false,
+            detail: String::new(),
+            detail_title: "Diff".into(),
+            detail_scroll: (0, 0),
+            popup_scroll: 0,
+            focus_detail: false,
+            popup: None,
+            status: "Connecting…".into(),
+            busy: false,
+            quit: false,
+            mutating: false,
+            external_edit: None,
+            target: "default".into(),
+            limit,
+            drill: None,
+            parent: None,
+            last_refresh: Instant::now(),
+            worker: None,
+            refresh_needed: false,
+            detail_needed: true,
+            selection_changed: Instant::now(),
+        }
+    }
+    pub fn visible(&self) -> Vec<&Item> {
+        let needle = self.filter.to_lowercase();
+        self.view
+            .items
+            .iter()
+            .filter(|i| needle.is_empty() || i.search_text().to_lowercase().contains(&needle))
+            .collect()
+    }
+    pub fn current(&self) -> Option<Item> {
+        self.visible().get(self.selected).map(|i| (*i).clone())
+    }
+    fn current_key(&self) -> String {
+        self.current()
+            .map(|i| format!("{:?}:{}", self.tab, i.key()))
+            .unwrap_or_default()
+    }
+    fn selection_updated(&mut self) {
+        self.detail_needed = true;
+        self.selection_changed = Instant::now();
+        self.detail_scroll = (0, 0);
+        self.detail.clear();
+        self.detail_title = "Diff / details".into();
+    }
+    fn message(&mut self, title: &str, text: impl Into<String>) {
+        self.popup_scroll = 0;
+        self.popup = Some(Popup::Message {
+            title: title.into(),
+            text: text.into(),
+        });
+    }
+    fn input(&mut self, kind: InputKind, value: String) {
+        self.popup = Some(Popup::Input { kind, value });
+    }
+    fn confirm(&mut self, action: Action, text: impl Into<String>) {
+        self.popup = Some(Popup::Confirm {
+            action,
+            text: text.into(),
+        });
+    }
+    fn send(&mut self, req: Request) -> Result<()> {
+        if let Some(worker) = &self.worker {
+            worker.send.send(req)?;
+            self.busy = true;
+        }
+        Ok(())
+    }
+    pub fn tick(&mut self) -> Result<()> {
+        let response = self.worker.as_ref().and_then(|w| w.receive.try_recv().ok());
+        if let Some(response) = response {
+            self.busy = false;
+            self.mutating = false;
+            match response {
+                Response::ChangeFiles(id, tab, result) => {
+                    if tab == self.tab && self.drill.as_ref() == Some(&id) {
+                        match result {
+                            Ok(view) => {
+                                self.view = view;
+                                self.selected =
+                                    self.selected.min(self.visible().len().saturating_sub(1));
+                                self.detail_needed = true;
+                                self.status = format!("Changelist {id} · Esc returns to list");
+                            }
+                            Err(e) => {
+                                self.message("Cannot load changelist files", format!("{e:#}"))
+                            }
+                        }
+                        self.last_refresh = Instant::now();
+                    }
+                }
+                Response::Load(tab, result) => {
+                    if tab == self.tab && self.drill.is_none() {
+                        match result {
+                            Ok(view) => {
+                                let key = self.current().map(|i| i.key().to_string());
+                                if !self.view.info.client.is_empty()
+                                    && self.view.info.client != view.info.client
+                                {
+                                    self.target = "default".into();
+                                    self.filter.clear();
+                                    self.selection_updated();
+                                }
+                                self.view = view;
+                                self.selected = key
+                                    .and_then(|k| self.visible().iter().position(|i| i.key() == k))
+                                    .unwrap_or(self.selected)
+                                    .min(self.visible().len().saturating_sub(1));
+                                self.status = format!(
+                                    "{} items · scope: current directory and descendants",
+                                    self.view.items.len()
+                                );
+                                self.detail_needed = true;
+                            }
+                            Err(e) => {
+                                self.status = format!("{e:#}");
+                                self.message("Perforce error",format!("{e:#}\n\nCheck p4 info and p4 login in this directory, then press r to retry."));
+                            }
+                        }
+                        self.last_refresh = Instant::now();
+                    }
+                }
+                Response::Detail(key, result) => {
+                    if key == self.current_key() {
+                        self.detail = result.unwrap_or_else(|e| format!("{e:#}"));
+                    }
+                }
+                Response::Edit(result) => {
+                    match result {
+                        Ok(path) => self.external_edit = Some(path),
+                        Err(e) => self.message("Cannot edit file", format!("{e:#}")),
+                    }
+                    self.refresh_needed = true;
+                }
+                Response::Act(result) => {
+                    match result {
+                        Ok(text) => {
+                            self.message("Command result", text);
+                            self.status = "Completed; refreshing…".into();
+                        }
+                        Err(e) => self.message(
+                            "Command failed — inspect state before retrying",
+                            format!("{e:#}"),
+                        ),
+                    }
+                    self.refresh_needed = true;
+                }
+            }
+        }
+        if self.config.refresh_seconds > 0
+            && self.drill.is_none()
+            && self.popup.is_none()
+            && !self.searching
+            && self.last_refresh.elapsed() >= Duration::from_secs(self.config.refresh_seconds)
+        {
+            self.refresh_needed = true;
+        }
+        if !self.busy && self.refresh_needed {
+            self.refresh_needed = false;
+            if let Some(id) = &self.drill {
+                self.send(Request::ChangeFiles(id.clone(), self.tab))?;
+            } else {
+                self.send(Request::Load(self.tab, self.limit))?;
+            }
+        } else if !self.busy
+            && self.detail_needed
+            && self.selection_changed.elapsed() >= Duration::from_millis(100)
+        {
+            self.detail_needed = false;
+            if let Some(item) = self.current() {
+                let key = self.current_key();
+                self.detail_title = item.key().to_string();
+                self.send(Request::Detail(key, Detail::Item(item, self.tab)))?;
+            } else {
+                self.detail.clear();
+            }
+        }
+        Ok(())
+    }
+    pub fn switch_tab(&mut self, tab: Tab) {
+        self.drill = None;
+        self.parent = None;
+        self.tab = tab;
+        self.view.items.clear();
+        self.selected = 0;
+        self.filter.clear();
+        self.focus_detail = false;
+        self.refresh_needed = true;
+        self.selection_updated();
+    }
+    fn act(&mut self, action: Action) -> Result<()> {
+        if self.busy {
+            self.message("Busy", "Wait for the current Perforce request to finish.");
+            return Ok(());
+        }
+        self.status = "Running Perforce command…".into();
+        self.mutating = true;
+        self.send(Request::Act(action))
+    }
+    pub fn key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.request_quit();
+            return Ok(());
+        }
+        if self.popup.is_some() {
+            return self.popup_key(key);
+        }
+        if self.searching {
+            match key.code {
+                KeyCode::Esc => {
+                    self.searching = false;
+                    self.filter.clear();
+                    self.selected = 0;
+                    self.selection_updated();
+                }
+                KeyCode::Enter => self.searching = false,
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.selected = 0;
+                    self.selection_updated();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.filter.push(c);
+                    self.selected = 0;
+                    self.selection_updated();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if self.drill.take().is_some() {
+                    if let Some((items, selected)) = self.parent.take() {
+                        self.view.items = items;
+                        self.selected = selected;
+                    }
+                    self.refresh_needed = true;
+                }
+                self.focus_detail = false;
+                self.filter.clear();
+                self.selection_updated();
+            }
+            KeyCode::Tab => {
+                self.focus_detail = !self.focus_detail;
+            }
+            KeyCode::BackTab => {
+                self.switch_tab(Tab::ALL[(self.tab.index() + 8) % 9]);
+            }
+            KeyCode::Left if !self.focus_detail => {
+                self.switch_tab(Tab::ALL[(self.tab.index() + 8) % 9])
+            }
+            KeyCode::Right if !self.focus_detail => {
+                self.switch_tab(Tab::ALL[(self.tab.index() + 1) % 9])
+            }
+            KeyCode::Left => self.detail_scroll.1 = self.detail_scroll.1.saturating_sub(4),
+            KeyCode::Right => self.detail_scroll.1 = self.detail_scroll.1.saturating_add(4),
+            KeyCode::Down => self.navigate(1),
+            KeyCode::Up => self.navigate(-1),
+            KeyCode::PageDown => self.navigate(15),
+            KeyCode::PageUp => self.navigate(-15),
+            KeyCode::Home => {
+                if self.focus_detail {
+                    self.detail_scroll = (0, 0);
+                } else {
+                    self.selected = 0;
+                    self.selection_updated();
+                }
+            }
+            KeyCode::End => {
+                if self.focus_detail {
+                    self.detail_scroll.0 = self
+                        .detail
+                        .lines()
+                        .count()
+                        .saturating_sub(5)
+                        .min(u16::MAX as usize) as u16;
+                } else {
+                    self.selected = self.visible().len().saturating_sub(1);
+                    self.selection_updated();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(Item::Change { id, .. }) = self.current() {
+                    self.parent = Some((std::mem::take(&mut self.view.items), self.selected));
+                    self.drill = Some(id);
+                    self.selected = 0;
+                    self.filter.clear();
+                    self.selection_updated();
+                    self.refresh_needed = true;
+                } else {
+                    self.focus_detail = true;
+                }
+            }
+            KeyCode::F(1) => self.popup = Some(Popup::Help),
+            KeyCode::F(5) => self.refresh_needed = true,
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                self.switch_tab(Tab::ALL[c as usize - '1' as usize])
+            }
+            KeyCode::Char('+') => {
+                self.limit = (self.limit + self.config.page_size).min(10000);
+                self.refresh_needed = true;
+            }
+            KeyCode::Char(c) => self.char_key(c)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    fn navigate(&mut self, amount: i32) {
+        if self.focus_detail {
+            let max = self
+                .detail
+                .lines()
+                .count()
+                .saturating_sub(1)
+                .min(u16::MAX as usize) as u16;
+            self.detail_scroll.0 =
+                (self.detail_scroll.0 as i32 + amount).clamp(0, max as i32) as u16;
+        } else {
+            let max = self.visible().len().saturating_sub(1);
+            self.selected = self
+                .selected
+                .saturating_add_signed(amount as isize)
+                .min(max);
+            self.selection_updated();
+        }
+    }
+    fn char_key(&mut self, c: char) -> Result<()> {
+        let bound = |action| c == self.config.key(action);
+        if bound("quit") {
+            self.request_quit();
+        } else if bound("help") {
+            self.popup = Some(Popup::Help);
+        } else if bound("refresh") {
+            self.refresh_needed = true;
+        } else if bound("search") {
+            self.searching = true;
+        } else if bound("up") {
+            self.navigate(-1);
+        } else if bound("down") {
+            self.navigate(1);
+        } else if bound("sync") {
+            self.confirm(Action::Sync,"Sync the current directory and descendants to depot HEAD? Perforce may update local files. Opened files are preserved by normal p4 sync semantics.");
+        } else if bound("new_change") {
+            if self.tab == Tab::Streams {
+                self.input(
+                    InputKind::NewStream(self.view.info.stream.clone()),
+                    String::new(),
+                );
+            } else {
+                self.input(InputKind::NewChange, String::new());
+            }
+        } else if c == 'A' {
+            self.confirm(
+                Action::Reconcile(None, self.target.clone()),
+                format!(
+                    "Reconcile ALL offline changes in this directory into changelist {}?",
+                    self.target
+                ),
+            );
+        } else if bound("submit") {
+            let id = if self.tab == Tab::Changes && self.drill.is_some() {
+                self.drill.clone().unwrap_or_default()
+            } else {
+                match self.current() {
+                    Some(Item::Change { id, .. }) if self.tab == Tab::Changes => id,
+                    _ => self.target.clone(),
+                }
+            };
+            if id == "default" {
+                self.input(InputKind::SubmitDefault, String::new());
+            } else {
+                self.confirm(Action::Submit(id.clone(),String::new()),format!("Submit ALL files in changelist {id} to the depot using its saved description? This publishes the change for other users."));
+            }
+        } else if let Some(item) = self.current() {
+            match item {
+                Item::File(f) => {
+                    if bound("open") {
+                        if !self.busy {
+                            self.mutating = true;
+                            self.send(Request::Edit(f, self.target.clone()))?;
+                        }
+                    } else if bound("reconcile") || c == ' ' {
+                        self.act(if f.opened {
+                            Action::Reopen(f, self.target.clone())
+                        } else {
+                            Action::Reconcile(Some(f), self.target.clone())
+                        })?;
+                    } else if bound("edit") {
+                        self.act(Action::Edit(f, self.target.clone()))?;
+                    } else if bound("revert") {
+                        self.confirm(Action::Revert(f.clone(),false),format!("REVERT {}?\n\nLocal edits will be lost. Added files remain on disk. Shelve work first if it may be needed.",f.depot));
+                    } else if bound("unshelve") {
+                        self.confirm(Action::Revert(f.clone(),true),format!("Remove {} from its changelist while KEEPING workspace content?\n\nPerforce revert -k changes metadata only. Deleted files stay deleted.",f.depot));
+                    } else if bound("move_change") {
+                        self.input(InputKind::Reopen(f), self.target.clone());
+                    } else if bound("delete") {
+                        self.confirm(Action::Delete(f.clone()),format!("Open {} for DELETE? This removes the local file; the depot deletion happens on submit.",f.depot));
+                    } else if bound("rename") {
+                        self.input(InputKind::Move(f), String::new());
+                    } else if bound("resolve") {
+                        self.input(InputKind::Resolve(f), "-am".into());
+                    } else if bound("annotate") {
+                        self.request_detail(Detail::Annotate(f), "Annotate — submitted revisions")?;
+                    } else if bound("filelog") {
+                        self.request_detail(Detail::FileLog(f), "File history / integrations")?;
+                    } else if bound("revision") {
+                        self.input(InputKind::Revision(f), String::new());
+                    } else if bound("lock") {
+                        self.act(Action::Lock(f, true))?;
+                    } else if c == 'l' {
+                        self.act(Action::Lock(f, false))?;
+                    }
+                }
+                Item::Revision {
+                    depot, revision, ..
+                } => {
+                    let file = FileEntry {
+                        depot: depot.clone(),
+                        ..Default::default()
+                    };
+                    if bound("filelog") {
+                        self.request_detail(Detail::FileLog(file), "File history")?;
+                    } else if bound("annotate") {
+                        self.request_detail(
+                            Detail::Annotate(FileEntry {
+                                depot: format!("{depot}#{revision}"),
+                                ..Default::default()
+                            }),
+                            "Annotate revision",
+                        )?;
+                    }
+                }
+                Item::Change {
+                    id, description, ..
+                } => {
+                    if self.tab == Tab::Changes {
+                        if c == ' ' || bound("open") {
+                            self.target = id.clone();
+                            self.status = format!("Active changelist: {id}");
+                        } else if bound("shelve") {
+                            self.confirm(Action::Shelve(id.clone()),format!("Shelve files in changelist {id}?\nExisting shelved revisions are never overwritten automatically. Default must first be moved to a numbered changelist."));
+                        } else if bound("edit_change") {
+                            self.input(InputKind::EditChange(id), description);
+                        } else if bound("delete") {
+                            self.confirm(Action::DeleteChange(id.clone()),format!("Delete empty pending changelist {id}? Perforce refuses nonempty changelists."));
+                        }
+                    } else if self.tab == Tab::Shelves {
+                        if bound("unshelve") || c == ' ' {
+                            self.input(InputKind::Unshelve(id), self.target.clone());
+                        } else if bound("delete") {
+                            self.confirm(
+                                Action::DeleteShelf(id.clone()),
+                                format!(
+                                    "Permanently DELETE all shelved revisions in changelist {id}?"
+                                ),
+                            );
+                        }
+                    }
+                }
+                Item::Stream { path, .. } => {
+                    if bound("open") || c == ' ' {
+                        self.confirm(Action::SwitchStream(path.clone()),format!("Switch workspace to stream {path} and sync its files? This requires a clean stream workspace."));
+                    } else if bound("delete") {
+                        self.confirm(Action::DeleteStream(path.clone()),format!("Delete stream specification {path}? Submitted file history is retained. Perforce checks for active clients and children."));
+                    } else if c == 'g' {
+                        self.confirm(Action::MergeStream(path.clone(),self.target.clone()),format!("Merge files from {path} into the CURRENT stream {} in changelist {}?
+Review and resolve the result before submitting.",self.view.info.stream,self.target));
+                    } else if c == 'p' {
+                        self.confirm(Action::CopyStream(path.clone(),self.target.clone()),format!("Copy files from {path} into the CURRENT stream {} in changelist {}?
+This may replace target content. Inspect the pending change before submitting.",self.view.info.stream,self.target));
+                    }
+                }
+                Item::Workspace { name, .. } if bound("open") || c == ' ' => {
+                    self.confirm(Action::SwitchWorkspace(name.clone()),format!("Use workspace {name} for this session? The working directory will change to its root."));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn request_detail(&mut self, detail: Detail, title: &str) -> Result<()> {
+        if self.busy {
+            self.status = "Wait for the current request, then retry.".into();
+            return Ok(());
+        }
+        self.detail_needed = false;
+        self.focus_detail = true;
+        self.detail_scroll = (0, 0);
+        self.detail_title = title.into();
+        self.send(Request::Detail(self.current_key(), detail))
+    }
+    fn popup_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(popup) = self.popup.take() else {
+            return Ok(());
+        };
+        match popup {
+            Popup::Confirm { action, text } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.act(action)?,
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {}
+                _ => self.popup = Some(Popup::Confirm { action, text }),
+            },
+            Popup::Input { kind, mut value } => {
+                let submit = key.code == KeyCode::Enter
+                    && (!kind.multiline() || key.modifiers.contains(KeyModifiers::CONTROL))
+                    || key.code == KeyCode::Char('s')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                if key.code == KeyCode::Esc {
+                    return Ok(());
+                }
+                if submit {
+                    if value.trim().is_empty() {
+                        self.popup = Some(Popup::Input { kind, value });
+                        return Ok(());
+                    }
+                    match kind {
+                        InputKind::NewChange => self.act(Action::NewChange(value))?,
+                        InputKind::NewStream(parent) => self.confirm(Action::CreateStream(value.trim().into(),parent.clone()),format!("Create stream specification {} with parent {}? File content is populated separately using copy or merge.",value.trim(),if parent.is_empty() {"none (mainline)"} else {&parent})),
+                        InputKind::EditChange(id) => self.act(Action::EditChange(id,value))?,
+                        InputKind::SubmitDefault => self.confirm(Action::Submit("default".into(),value.clone()),format!("Submit ALL files in the DEFAULT changelist?\n\n{value}\n\nThis publishes the change for other users.")),
+                        InputKind::Reopen(f) => self.act(Action::Reopen(f,value.trim().into()))?,
+                        InputKind::Unshelve(id) => self.confirm(Action::Unshelve(id.clone(),value.trim().into()),format!("Unshelve {id} into {}? This may modify workspace files and require resolve. No force overwrite is used.",value.trim())),
+                        InputKind::Move(f) => self.confirm(Action::Move(f.clone(),value.clone()),format!("Move {} to {value}?",f.depot)),
+                        InputKind::Revision(f) => self.request_detail(Detail::Revision(f,value.trim().into()),"Depot revision")?,
+                        InputKind::Resolve(f) => self.confirm(Action::Resolve(f.clone(),value.trim().into()),format!("Resolve {} with {}?\n\n-am merges nonconflicting changes; -as is safe-only; -ay discards incoming changes; -at discards your changes. Conflicts left by automatic merge require an external merge tool.",f.depot,value.trim())),
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Backspace => {
+                            value.pop();
+                        }
+                        KeyCode::Enter if kind.multiline() => value.push('\n'),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            value.clear()
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && value.len() < 65536 =>
+                        {
+                            value.push(c)
+                        }
+                        _ => {}
+                    }
+                    self.popup = Some(Popup::Input { kind, value });
+                }
+            }
+            popup => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {}
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.popup_scroll = self.popup_scroll.saturating_add(1);
+                    self.popup = Some(popup);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.popup_scroll = self.popup_scroll.saturating_sub(1);
+                    self.popup = Some(popup);
+                }
+                KeyCode::PageDown => {
+                    self.popup_scroll = self.popup_scroll.saturating_add(15);
+                    self.popup = Some(popup);
+                }
+                KeyCode::PageUp => {
+                    self.popup_scroll = self.popup_scroll.saturating_sub(15);
+                    self.popup = Some(popup);
+                }
+                _ => self.popup = Some(popup),
+            },
+        }
+        Ok(())
+    }
+    fn request_quit(&mut self) {
+        if self.mutating {
+            self.status =
+                "A mutating command is running. Wait for completion before quitting.".into();
+        } else {
+            self.quit = true;
+        }
+    }
+    pub fn refresh(&mut self) {
+        self.refresh_needed = true;
+    }
+    pub fn editor_error(&mut self, error: String) {
+        self.message("Editor failed", error);
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(Popup::Input { kind, value }) = &mut self.popup {
+            for c in text
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+            {
+                if value.len() >= 65536 {
+                    break;
+                }
+                if c == '\n' && !kind.multiline() {
+                    continue;
+                }
+                value.push(c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    #[test]
+    fn destructive_actions_require_explicit_yes() {
+        let mut app = App::for_view(
+            Config::default(),
+            View {
+                items: vec![Item::File(FileEntry {
+                    depot: "//depot/a".into(),
+                    opened: true,
+                    ..Default::default()
+                })],
+                ..Default::default()
+            },
+        );
+        app.key(key('U')).unwrap();
+        assert!(matches!(app.popup, Some(Popup::Confirm { .. })));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.popup, Some(Popup::Confirm { .. })));
+        app.key(key('n')).unwrap();
+        assert!(app.popup.is_none());
+    }
+    #[test]
+    fn unicode_input_and_search_are_safe() {
+        let mut app = App::for_view(Config::default(), View::default());
+        app.key(key('n')).unwrap();
+        app.paste("💥\nFiles:\n//depot/evil");
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.popup,Some(Popup::Input {ref value,..}) if value.ends_with("evi")));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.key(key('/')).unwrap();
+        app.key(key('日')).unwrap();
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.filter.is_empty());
+    }
+}

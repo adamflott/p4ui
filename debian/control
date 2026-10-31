@@ -1,0 +1,21 @@
+Source: p4ui
+Section: devel
+Priority: optional
+Maintainer: Adam Flott <adam@adamflott.com>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88), python3
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/adamflott/p4ui
+Vcs-Git: https://github.com/adamflott/p4ui.git
+Vcs-Browser: https://github.com/adamflott/p4ui
+
+Package: p4ui
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Suggests: p4-cli | helix-cli
+Description: keyboard-driven terminal interface for Perforce
+ Browse workspace changes, diffs, changelists, shelves, history and streams
+ from a gitui-inspired terminal interface. Supports submitting, reconciling,
+ syncing and resolving files through the Perforce command-line client.
+ .
+ The separately distributed Perforce p4 client must be available on PATH.
