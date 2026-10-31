@@ -102,7 +102,10 @@ impl Worker {
                                     .as_ref()
                                     .is_none_or(|(generation, _)| *generation != epoch)
                             {
-                                history_context = Some((epoch, connection.history_context()?));
+                                let (context, view) =
+                                    connection.start_history(tab, cursor, size)?;
+                                history_context = Some((epoch, context));
+                                return Ok(view);
                             }
                             let (_, context) = history_context
                                 .as_ref()
@@ -277,6 +280,15 @@ impl App {
         let response = self.worker.as_ref().and_then(|w| w.receive.try_recv().ok());
         if let Some(response) = response {
             self.busy = false;
+            if !self.mutating
+                && self
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.cancel.load(Ordering::Relaxed))
+            {
+                // Discard cancelled reads even after a quick tab round trip.
+                return Ok(());
+            }
             self.mutating = false;
             match response {
                 Response::History(tab, cursor, epoch, result) => {

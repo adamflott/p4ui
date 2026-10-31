@@ -12,6 +12,7 @@ use p4ui::{app::App, config::Config, model::Tab, p4::Connection, ui};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
+    num::NonZeroUsize,
     path::PathBuf,
     sync::{
         Arc,
@@ -48,6 +49,9 @@ struct Args {
     /// Path to the p4 executable
     #[arg(long, default_value = "p4")]
     p4: PathBuf,
+    /// Maximum concurrent p4 child processes (1 runs requests serially)
+    #[arg(long, default_value = "4")]
+    max_p4_processes: NonZeroUsize,
     /// Alternate configuration file
     #[arg(long)]
     config: Option<PathBuf>,
@@ -125,6 +129,7 @@ fn run() -> Result<()> {
         directory.display()
     );
     let mut connection = Connection::new(directory, &config);
+    connection.set_max_processes(args.max_p4_processes);
     connection.executable = args.p4;
     // An empty P4PORT leaves resolution to the normal p4 configuration.
     connection.port = args.port.filter(|port| !port.is_empty());
@@ -247,4 +252,23 @@ fn run_editor(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("Starting editor {executable}"))?;
     ensure!(status.success(), "Editor exited with {status}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_limit_defaults_to_four_and_rejects_zero() -> Result<()> {
+        assert_eq!(Args::try_parse_from(["p4ui"])?.max_p4_processes.get(), 4);
+        assert_eq!(
+            Args::try_parse_from(["p4ui", "--max-p4-processes", "1"])?
+                .max_p4_processes
+                .get(),
+            1
+        );
+        assert!(Args::try_parse_from(["p4ui", "--max-p4-processes", "0"]).is_err());
+        assert!(Args::try_parse_from(["p4ui", "--max-p4-processes", "-1"]).is_err());
+        Ok(())
+    }
 }

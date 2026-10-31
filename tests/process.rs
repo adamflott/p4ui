@@ -90,15 +90,20 @@ elif 'changes' in args:
   print(json.dumps({'severity':3,'generic':35,'data':'Too many rows scanned; see p4 help maxscanrows.'}));sys.exit(1)
  if mode=='permission':
   print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
- changes=list(range(100000000,100000000-240*1009,-1009)) if mode in ('many','fail_older','slow_status') else [9999,9995,9991]
+ changes=list(range(100000000,100000000-240*1009,-1009)) if mode in ('many','fail_older','slow_status','slow_status_once') else [9999,9995,9991]
  before=int(scope[4:]) if scope!='...' else 2**63
  maximum=int(args[args.index('-m')+1]);assert 1<=maximum<=200
  for change in [change for change in changes if change<=before][:maximum]:
   print(json.dumps({'change':str(change),'desc':'example','user':'tester','client':'test','status':'submitted'}))
-elif 'fstat' in args and mode=='slow_status':
+elif 'fstat' in args and mode in ('slow_status','slow_status_once'):
  assert '-Ro' in args
- pathlib.Path(__file__).with_suffix('.started').touch()
- time.sleep(10)
+ marker=pathlib.Path(__file__).with_suffix('.started')
+ if mode=='slow_status_once' and marker.exists():
+  print(json.dumps({'depotFile':'//depot/opened','clientFile':'/workspace/opened','action':'edit','change':'default'}))
+ else:
+  marker.touch();time.sleep(10)
+elif 'reconcile' in args and mode in ('slow_status','slow_status_once'):
+ assert '-n' in args
 elif 'sync' in args and mode=='slow_mutation':
  pathlib.Path(__file__).with_suffix('.started').touch()
  time.sleep(0.3)
@@ -166,7 +171,19 @@ fn history_errors_do_not_return_partial_pages_or_automatically_retry() -> Result
     use p4ui::model::Tab;
     for mode in ["limit", "permission"] {
         let (_dir, c) = history_fake(mode)?;
-        assert!(c.load_history(Tab::Log, None).is_err());
+        let error = c
+            .load_history(Tab::Log, None)
+            .err()
+            .context("Expected history error")?;
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(if mode == "limit" {
+                "maxscanrows"
+            } else {
+                "Permission denied"
+            }),
+            "{message}"
+        );
         let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
         assert_eq!(
             calls
@@ -352,6 +369,24 @@ fn switching_to_log_cancels_a_slow_status_read() -> Result<()> {
         "Log waited for the 10-second Status command"
     );
     assert!(app.popup.is_none());
+    Ok(())
+}
+
+#[test]
+fn quick_tab_roundtrip_discards_cancelled_reads_and_loads_a_fresh_view() -> Result<()> {
+    use p4ui::{app::App, model::Tab};
+    let (_dir, connection) = history_fake("slow_status_once")?;
+    connection.set_max_processes(std::num::NonZeroUsize::MIN);
+    let started = connection.executable.with_extension("started");
+    let mut app = App::new(Config::default(), connection);
+    drive_app(&mut app, |_| started.exists())?;
+    app.switch_tab(Tab::Log);
+    app.switch_tab(Tab::Status);
+    drive_app(&mut app, |app| app.view.items.len() == 1 && !app.busy)?;
+    assert!(
+        app.popup.is_none(),
+        "Cancelled result was shown after returning to the same tab"
+    );
     Ok(())
 }
 

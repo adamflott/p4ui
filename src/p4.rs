@@ -1,12 +1,13 @@
 //! The CLI is our protocol boundary. No command is evaluated by a shell.
-use crate::{config::Config, model::*};
+use crate::{config::Config, model::*, process_limit::ProcessLimit};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::HashSet,
     io::{Read, Seek, SeekFrom, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -30,6 +31,21 @@ pub struct Connection {
     /// Used by isolated integration fixtures; normal operation inherits P4 settings.
     pub environment: Vec<(String, String)>,
     pub cancelled: Arc<AtomicBool>,
+    processes: Arc<ProcessLimit>,
+}
+
+/// Reap a child on every exit path, before its concurrency permit is released.
+struct RunningP4(Child);
+impl Drop for RunningP4 {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn join_read<T>(task: thread::ScopedJoinHandle<'_, Result<T>>) -> Result<T> {
+    task.join()
+        .map_err(|_| anyhow::anyhow!("Perforce read task panicked"))?
 }
 
 pub(crate) struct HistoryContext {
@@ -58,7 +74,12 @@ impl Connection {
             history_max_scan_rows: config.history_max_scan_rows,
             environment: Vec::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            processes: Arc::new(ProcessLimit::default()),
         }
+    }
+    /// Configure the process limit shared by this connection and all its clones.
+    pub fn set_max_processes(&self, maximum: NonZeroUsize) {
+        self.processes.set_maximum(maximum);
     }
     fn command(&self, json: bool) -> Command {
         let mut c = Command::new(&self.executable);
@@ -85,10 +106,7 @@ impl Connection {
     }
     /// Tempfiles drain output without pipe deadlocks and bound memory consumption.
     pub fn execute(&self, args: &[&str], form: Option<&str>, json: bool) -> Result<String> {
-        ensure!(
-            !self.cancelled.load(Ordering::Relaxed),
-            "Perforce request cancelled"
-        );
+        let _permit = self.processes.acquire(&self.cancelled)?;
         let mut out = tempfile::tempfile()?;
         let mut err = tempfile::tempfile()?;
         let mut input = tempfile::tempfile()?;
@@ -96,22 +114,23 @@ impl Connection {
             input.write_all(form.as_bytes())?;
             input.seek(SeekFrom::Start(0))?;
         }
-        let mut child = self
-            .command(json)
-            .args(args)
-            .stdin(Stdio::from(input))
-            .stdout(out.try_clone()?)
-            .stderr(err.try_clone()?)
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Could not start {}. Install the Perforce command-line client.",
-                    self.executable.display()
-                )
-            })?;
+        let mut child = RunningP4(
+            self.command(json)
+                .args(args)
+                .stdin(Stdio::from(input))
+                .stdout(out.try_clone()?)
+                .stderr(err.try_clone()?)
+                .spawn()
+                .with_context(|| {
+                    format!(
+                        "Could not start {}. Install the Perforce command-line client.",
+                        self.executable.display()
+                    )
+                })?,
+        );
         let start = Instant::now();
         let status = loop {
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = child.0.try_wait()? {
                 break status;
             }
             let too_large = out.metadata()?.len() + err.metadata()?.len() > self.max_output;
@@ -119,8 +138,8 @@ impl Connection {
                 || start.elapsed() >= self.timeout
                 || self.cancelled.load(Ordering::Relaxed)
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.0.kill();
+                let _ = child.0.wait();
                 bail!(
                     "p4 {} stopped: {}. A mutating command may have completed on the server; refresh and inspect before retrying.",
                     args.first().unwrap_or(&""),
@@ -191,6 +210,9 @@ impl Connection {
         Ok(info)
     }
     pub fn load(&self, tab: Tab, limit: usize) -> Result<View> {
+        if matches!(tab, Tab::Status | Tab::Resolve) {
+            return self.workspace_status(tab);
+        }
         let info = self.info()?;
         let mut view = View {
             info,
@@ -199,32 +221,7 @@ impl Connection {
         let scope = "...";
         let n = limit.to_string();
         match tab {
-            Tab::Status | Tab::Resolve => {
-                let opened =
-                    self.listing_records(&["fstat", "-Ro", "-Or", scope], &mut view.warnings)?;
-                for r in opened.iter().filter(|r| r.get("depotFile").is_some()) {
-                    let f = file(r, true);
-                    if tab == Tab::Status || f.unresolved {
-                        view.items.push(Item::File(f));
-                    }
-                }
-                if tab == Tab::Status {
-                    let known: HashSet<String> =
-                        view.items.iter().map(|i| i.key().to_string()).collect();
-                    for r in
-                        self.listing_records(&["reconcile", "-n", "-f", scope], &mut view.warnings)?
-                    {
-                        if r.get("depotFile").is_some() && !known.contains(&field(&r, "depotFile"))
-                        {
-                            view.items.push(Item::File(file(&r, false)));
-                        }
-                    }
-                    view.items.sort_by_key(|i| match i {
-                        Item::File(f) => (!f.opened, f.change.clone(), f.depot.clone()),
-                        _ => (false, String::new(), String::new()),
-                    });
-                }
-            }
+            Tab::Status | Tab::Resolve => unreachable!("workspace status is handled above"),
             Tab::Log | Tab::Shelves => {
                 let context = self.history_context_with_info(view.info);
                 return self.history_page(tab, None, limit, &context);
@@ -309,16 +306,90 @@ impl Connection {
         }
         Ok(view)
     }
-    pub fn load_history(&self, tab: Tab, cursor: Option<HistoryCursor>) -> Result<View> {
-        self.history_page(
-            tab,
-            cursor,
-            self.history_page_size,
-            &self.history_context()?,
-        )
+    fn workspace_status(&self, tab: Tab) -> Result<View> {
+        thread::scope(|scope| {
+            let info = scope.spawn(|| self.info());
+            let opened = scope.spawn(|| {
+                let mut warnings = Vec::new();
+                let rows = self.listing_records(&["fstat", "-Ro", "-Or", "..."], &mut warnings)?;
+                Ok((rows, warnings))
+            });
+            let offline = (tab == Tab::Status).then(|| {
+                scope.spawn(|| {
+                    let mut warnings = Vec::new();
+                    let rows =
+                        self.listing_records(&["reconcile", "-n", "-f", "..."], &mut warnings)?;
+                    Ok((rows, warnings))
+                })
+            });
+            // Join every task before propagating an error, including a panic
+            // converted by join_read, so no scoped task is left unobserved.
+            let info = join_read(info);
+            let opened = join_read(opened);
+            let offline = offline.map(join_read).transpose();
+            let info = info?;
+            let (opened, warnings) = opened?;
+            let mut view = View {
+                info,
+                warnings,
+                ..Default::default()
+            };
+            for record in opened
+                .iter()
+                .filter(|record| record.get("depotFile").is_some())
+            {
+                let file = file(record, true);
+                if tab == Tab::Status || file.unresolved {
+                    view.items.push(Item::File(file));
+                }
+            }
+            if let Some((records, warnings)) = offline? {
+                view.warnings.extend(warnings);
+                let known: HashSet<String> = view
+                    .items
+                    .iter()
+                    .map(|item| item.key().to_owned())
+                    .collect();
+                for record in records {
+                    if record.get("depotFile").is_some()
+                        && !known.contains(&field(&record, "depotFile"))
+                    {
+                        view.items.push(Item::File(file(&record, false)));
+                    }
+                }
+                view.items.sort_by_key(|item| match item {
+                    Item::File(file) => (!file.opened, file.change.clone(), file.depot.clone()),
+                    _ => (false, String::new(), String::new()),
+                });
+            }
+            Ok(view)
+        })
     }
-    pub(crate) fn history_context(&self) -> Result<HistoryContext> {
-        Ok(self.history_context_with_info(self.info()?))
+    pub fn load_history(&self, tab: Tab, cursor: Option<HistoryCursor>) -> Result<View> {
+        Ok(self.start_history(tab, cursor, self.history_page_size)?.1)
+    }
+    pub(crate) fn start_history(
+        &self,
+        tab: Tab,
+        cursor: Option<HistoryCursor>,
+        size: usize,
+    ) -> Result<(HistoryContext, View)> {
+        if self.history_max_scan_rows != 0 {
+            // Group limits depend on the authenticated user returned by info.
+            let context = self.history_context_with_info(self.info()?);
+            let view = self.history_page(tab, cursor, size, &context)?;
+            return Ok((context, view));
+        }
+        thread::scope(|scope| {
+            let info = scope.spawn(|| self.info());
+            let context = self.history_context_with_info(Info::default());
+            let view = self.history_page(tab, cursor, size, &context);
+            let info = join_read(info);
+            let mut view = view?;
+            let context = self.history_context_with_info(info?);
+            view.info = context.info.clone();
+            Ok((context, view))
+        })
     }
     fn history_context_with_info(&self, info: Info) -> HistoryContext {
         let mut context = HistoryContext {

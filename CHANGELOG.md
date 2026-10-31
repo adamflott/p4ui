@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `--max-p4-processes N` caps concurrent P4 processes per instance (default 4; use 1 for serial requests). Independent Status and initial history reads run in parallel; mutations remain serialized.
+- Cancelled background reads are discarded after rapid tab switches, and child processes are reaped before their concurrency slots are released.
+
 ## 0.2.0 — 2026-10-31
 
 - Log and Shelves fill the visible terminal rows and load older changes as you scroll with the keyboard or mouse wheel. Enlarging the terminal fills the extra rows.
