@@ -68,3 +68,90 @@ else:
     assert!(c.act(Action::Reconcile(None, "default".into())).is_err());
     Ok(())
 }
+fn history_fake(mode: &str) -> Result<(tempfile::TempDir, Connection)> {
+    let source = r#"import json,sys,os,pathlib
+with pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
+if 'info' in sys.argv:
+ print(json.dumps({'userName':'tester','clientName':'test','clientRoot':'/workspace'}))
+elif 'groups' in sys.argv:
+ if os.environ['MODE']=='groups_denied':
+  print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
+ print(json.dumps({'group':'bounded','maxScanRows':'80','maxResults':'3'}))
+elif 'counter' in sys.argv: print(json.dumps({'value':'10000'}))
+elif 'changes' in sys.argv:
+ assert any(arg.startswith('...@') and ',@' in arg for arg in sys.argv), 'Unbounded history query'
+ if os.environ['MODE']=='groups_denied': assert not any(arg.startswith('-zmaxScanRows=') for arg in sys.argv)
+ else:
+  assert '-zmaxScanRows=80' in sys.argv
+  assert sys.argv[sys.argv.index('-m')+1]=='3'
+ if os.environ['MODE']=='limit':
+  print(json.dumps({'severity':3,'generic':35,'data':'Too many rows scanned (over 80); see p4 help maxscanrows.'}));sys.exit(1)
+ if os.environ['MODE']=='permission':
+  print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
+ for change in ['9999','9995','9991']:
+  print(json.dumps({'change':change,'desc':'example','user':'tester','client':'test','status':'submitted'}))
+"#;
+    let (dir, mut connection) = fake(source)?;
+    connection.environment.push(("MODE".into(), mode.into()));
+    Ok((dir, connection))
+}
+#[test]
+fn history_uses_bounded_ranges_and_never_raises_admin_limits() -> Result<()> {
+    use p4ui::model::Tab;
+    let (_dir, c) = history_fake("success")?;
+    let view = c.load_history(Tab::Log, None)?;
+    let page = view
+        .history
+        .ok_or_else(|| anyhow::anyhow!("Missing history metadata"))?;
+    assert_eq!(page.requested_scan_limit, Some(80));
+    assert_eq!(page.group_scan_limit, Some(80));
+    assert_eq!(view.items.len(), 3);
+    assert_eq!(page.next.map(|cursor| cursor.before), Some(9990));
+    let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
+    assert!(calls.contains("...@9001,@10000"));
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains("\"changes\""))
+            .count(),
+        1
+    );
+    Ok(())
+}
+#[test]
+fn resource_failure_returns_smaller_cursor_without_automatic_retries() -> Result<()> {
+    use p4ui::model::Tab;
+    let (_dir, c) = history_fake("limit")?;
+    let view = c.load_history(Tab::Log, None)?;
+    assert!(view.items.is_empty());
+    assert_eq!(view.warnings.len(), 1);
+    let next = view
+        .history
+        .and_then(|page| page.next)
+        .ok_or_else(|| anyhow::anyhow!("Expected retry cursor"))?;
+    assert_eq!(next.before, 10000);
+    assert_eq!(next.window, 500);
+    let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.contains("\"changes\""))
+            .count(),
+        1
+    );
+    Ok(())
+}
+#[test]
+fn history_permission_failures_are_fatal_and_unknown_limits_are_not_overridden() -> Result<()> {
+    use p4ui::model::Tab;
+    let (_dir, c) = history_fake("permission")?;
+    assert!(c.load_history(Tab::Log, None).is_err());
+    let (_dir, c) = history_fake("groups_denied")?;
+    let view = c.load_history(Tab::Log, None)?;
+    assert!(!view.warnings.is_empty());
+    assert_eq!(
+        view.history.and_then(|page| page.requested_scan_limit),
+        None
+    );
+    Ok(())
+}

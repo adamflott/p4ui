@@ -214,7 +214,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
             " {}{}",
             one_line(&app.status),
             if app.view.limit_reached {
-                " · limit reached: + loads more"
+                if app.tab.is_history() && app.drill.is_none() {
+                    ""
+                } else {
+                    " · limit reached: + loads more"
+                }
             } else {
                 ""
             }
@@ -241,11 +245,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Tab::Status => {
                 "reconcile: a/Space   all: A   keep: u   revert: U   move CL: m   submit: c"
             }
-            Tab::Log => "browse files: Enter   search: /   more: +   Esc: back",
+            Tab::Log => "browse files: Enter   search loaded: /   older window: +   newest: r",
             Tab::Changes => {
                 "target: Space   new: n   describe: E   shelve: s   submit: c   delete: D"
             }
-            Tab::Shelves => "unshelve: u/Space   delete shelf: D   inspect: Enter",
+            Tab::Shelves => "unshelve: u/Space   delete shelf: D   files: Enter   older: +",
             Tab::Files => {
                 "editor: o   open for edit: e   annotate: b   history: h   revision: v   delete: D   rename: M"
             }
@@ -493,7 +497,7 @@ fn draw_popup(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
 fn help(app: &App) -> String {
     let k = |action| app.config.key(action);
     let instructions = format!(
-        "p4ui — Perforce in your terminal\n\nNavigation\n  1–9 / ←→: tabs    ↑↓ / {}{}: select    Tab / Enter: diff focus\n  PageUp/PageDown: scroll    Home/End: first/last\n  {}: filter loaded rows    Esc: clear filter / return to list\n  {} / F5: refresh    +: load more    {}: quit    Ctrl-C: exit\n\nStatus and files\n  {} / Space: reconcile selected offline file into active changelist\n  A: reconcile all files in the current directory and descendants\n  {}: open selected depot file for edit; o opens your external editor\n  {}: move opened file to a different changelist\n  u: remove open action, KEEP workspace content (revert -k)\n  {}: REVERT file and discard edits (confirmation required)\n  {}: open file for delete    {}: move/rename opened file\n  {}: annotate/blame    {}: revision/integration log    {}: view revision\n  {}: lock opened file    l: unlock\n\nChangelists\n  Space / {}: set active target changelist\n  {}: new numbered changelist    {}: edit saved description\n  {}: submit active or selected pending changelist\n  {}: delete empty pending changelist\n\nShelves\n  {} (Changes): shelve a numbered changelist; existing shelves are protected\n  {} (Shelves): unshelve into a chosen changelist\n  {} (Shelves): permanently delete shelf (confirmation required)\n  Shelving preserves opened files. Revert separately when ready.\n\nSync, streams, workspaces and resolve\n  {}: sync current directory and descendants to depot HEAD\n  {} / Space (Streams): switch clean workspace and sync\n  {} / Space (Workspaces): choose local workspace for this session\n  {}: resolve selected file (-am merge, -as safe, -ay yours, -at theirs)\n  Streams: n creates a development child of the CURRENT stream (or mainline).\n  D deletes a stream spec. g merges / p copies from the selected stream.\n  Use an external merge tool for conflicts automatic resolve leaves behind.\n\nPerforce semantics\n  All file actions and status are scoped to the launch directory and descendants.\n  Submit/shelve act on the WHOLE selected changelist, even outside this scope.\n  Files are opened as complete files: Perforce has no index or line staging.\n  Authentication uses existing p4 login tickets, P4CONFIG and P4 environment.\n  Never ignore a command error: a submit or sync can partially complete.\n  Filters search loaded rows only; + raises the query limit up to 10,000.\n  Theme and character bindings: ~/.config/p4ui/config.toml\n\nSee README.md for feature mapping, limitations and server tests.",
+        "p4ui — Perforce in your terminal\n\nNavigation\n  1–9 / ←→: tabs    ↑↓ / {}{}: select    Tab / Enter: diff focus\n  PageUp/PageDown: scroll    Home/End: first/last\n  {}: filter loaded rows    Esc: clear filter / return to list\n  {} / F5: refresh    +: load more    {}: quit    Ctrl-C: exit\n\nStatus and files\n  {} / Space: reconcile selected offline file into active changelist\n  A: reconcile all files in the current directory and descendants\n  {}: open selected depot file for edit; o opens your external editor\n  {}: move opened file to a different changelist\n  u: remove open action, KEEP workspace content (revert -k)\n  {}: REVERT file and discard edits (confirmation required)\n  {}: open file for delete    {}: move/rename opened file\n  {}: annotate/blame    {}: revision/integration log    {}: view revision\n  {}: lock opened file    l: unlock\n\nChangelists\n  Space / {}: set active target changelist\n  {}: new numbered changelist    {}: edit saved description\n  {}: submit active or selected pending changelist\n  {}: delete empty pending changelist\n\nShelves\n  {} (Changes): shelve a numbered changelist; existing shelves are protected\n  {} (Shelves): unshelve into a chosen changelist\n  {} (Shelves): permanently delete shelf (confirmation required)\n  Shelving preserves opened files. Revert separately when ready.\n\nSync, streams, workspaces and resolve\n  {}: sync current directory and descendants to depot HEAD\n  {} / Space (Streams): switch clean workspace and sync\n  {} / Space (Workspaces): choose local workspace for this session\n  {}: resolve selected file (-am merge, -as safe, -ay yours, -at theirs)\n  Streams: n creates a development child of the CURRENT stream (or mainline).\n  D deletes a stream spec. g merges / p copies from the selected stream.\n  Use an external merge tool for conflicts automatic resolve leaves behind.\n\nPerforce semantics\n  All file actions and status are scoped to the launch directory and descendants.\n  Submit/shelve act on the WHOLE selected changelist, even outside this scope.\n  Files are opened as complete files: Perforce has no index or line staging.\n  Authentication uses existing p4 login tickets, P4CONFIG and P4 environment.\n  Never ignore a command error: a submit or sync can partially complete.\n  History loads bounded changelist windows: + fetches older, r restarts.\n  Log and Shelves do not automatically poll the server.\n  Empty windows can occur on quiet branches; + continues without a full scan.\n  Change summaries show up to 200 files; Enter opens per-file diffs.\n  Filters search loaded rows only. Other tabs: + raises the result limit.\n  Theme and character bindings: ~/.config/p4ui/config.toml\n\nSee README.md for feature mapping, limitations and server tests.",
         k("up"),
         k("down"),
         k("search"),

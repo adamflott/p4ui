@@ -174,7 +174,7 @@ fn full_reconcile_diff_submit_history_and_annotate() -> Result<()> {
     ensure!(
         f.connection
             .detail(Detail::Item(log.items[0].clone(), Tab::Log))?
-            .contains("+changed")
+            .contains("Second revision")
     );
     ensure!(
         f.connection
@@ -224,7 +224,7 @@ fn numbered_changelist_shelve_unshelve_and_delete() -> Result<()> {
     ensure!(
         f.connection
             .detail(Detail::Item(shelves.items[0].clone(), Tab::Shelves))?
-            .contains("+shelved content")
+            .contains("Updated description")
     );
     ensure!(
         f.connection.act(Action::Shelve(id.clone())).is_err(),
@@ -817,5 +817,100 @@ fn cli_default_and_dot_directory_paths_reconcile_without_spurious_warnings() -> 
     }
     // Every invocation above is read-only: the fixture must still have no open files.
     ensure!(fixture.connection.records(&["opened", "..."])?.is_empty());
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> {
+    let mut f = Fixture::new()?;
+    std::fs::create_dir(f.path("sub"))?;
+    f.write("sub/file.txt", "initial\n")?;
+    f.write("other.txt", "initial\n")?;
+    f.connection
+        .act(Action::Reconcile(None, "default".into()))?;
+    f.connection
+        .act(Action::Submit("default".into(), "Initial files".into()))?;
+    let mut expected = vec![1u64];
+    for index in 1..=10 {
+        let scoped = index <= 2;
+        let name = if scoped { "sub/file.txt" } else { "other.txt" };
+        let file = FileEntry {
+            depot: format!("//depot/{name}"),
+            local: f.path(name).to_string_lossy().into(),
+            ..Default::default()
+        };
+        f.connection.act(Action::Edit(file, "default".into()))?;
+        f.write(name, &format!("revision {index}\n"))?;
+        f.connection
+            .act(Action::Submit("default".into(), format!("Change {index}")))?;
+        if scoped {
+            let rows = f
+                .connection
+                .records(&["changes", "-m", "1", "-s", "submitted"])?;
+            expected.push(field(&rows[0], "change").parse()?);
+        }
+    }
+    f.connection.directory = f.path("sub");
+    f.connection.history_page_size = 2;
+    f.connection.history_change_window = 4;
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    let mut empty = false;
+    let mut pages = 0;
+    loop {
+        let view = f.connection.load_history(Tab::Log, cursor)?;
+        ensure!(view.warnings.is_empty(), "{:?}", view.warnings);
+        ensure!(view.items.len() <= 2);
+        empty |= view.items.is_empty();
+        ids.extend(
+            view.items
+                .iter()
+                .map(|item| item.key().parse::<u64>())
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        );
+        let page = view.history.context("Missing cursor metadata")?;
+        ensure!(page.last_change - page.first_change < 4);
+        if let Some(next) = page.next {
+            if let Some(previous) = cursor {
+                ensure!(next.before < previous.before);
+            }
+            cursor = Some(next);
+        } else {
+            break;
+        }
+        pages += 1;
+        ensure!(pages < 20, "Pagination did not terminate");
+    }
+    ensure!(
+        empty,
+        "Sparse history should expose an empty bounded window"
+    );
+    expected.sort_by(|a, b| b.cmp(a));
+    ensure!(ids == expected, "Expected {expected:?}, got {ids:?}");
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn history_respects_reported_group_limits() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.seed()?;
+    let description = "Long editable description. ".repeat(20);
+    let id = f.change(&description)?;
+    let pending = f.connection.load(Tab::Changes, 200)?;
+    ensure!(
+        matches!(pending.items.iter().find(|item|item.key()==id),Some(Item::Change {description: saved,..}) if saved.trim()==description.trim()),
+        "Editable descriptions must not be truncated like history summaries"
+    );
+    f.connection.execute(
+        &["group", "-i"],
+        Some("Group: history-limit\nMaxScanRows: 1000\nMaxResults: 5\nUsers:\n\ttester\n"),
+        false,
+    )?;
+    let view = f.connection.load_history(Tab::Log, None)?;
+    ensure!(view.warnings.is_empty(), "{:?}", view.warnings);
+    let page = view.history.context("Expected history metadata")?;
+    ensure!(page.group_scan_limit == Some(1000));
+    ensure!(page.requested_scan_limit == Some(1000));
+    ensure!(view.items.len() == 1);
     Ok(())
 }

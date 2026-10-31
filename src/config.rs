@@ -9,6 +9,9 @@ pub struct Config {
     pub command_timeout_seconds: u64,
     pub max_output_mb: usize,
     pub page_size: usize,
+    pub history_page_size: usize,
+    pub history_change_window: u64,
+    pub history_max_scan_rows: u64,
     pub theme: String,
     /// Key to action, e.g. `quit = "Q"`. See README for supported actions.
     pub keys: BTreeMap<String, String>,
@@ -20,6 +23,9 @@ impl Default for Config {
             command_timeout_seconds: 120,
             max_output_mb: 16,
             page_size: 200,
+            history_page_size: 50,
+            history_change_window: 1000,
+            history_max_scan_rows: 50000,
             theme: "dark".into(),
             keys: BTreeMap::new(),
         }
@@ -53,6 +59,15 @@ impl Config {
         }
         if !(10..=10000).contains(&config.page_size) {
             bail!("page_size must be 10..=10000");
+        }
+        if !(1..=200).contains(&config.history_page_size) {
+            bail!("history_page_size must be 1..=200");
+        }
+        if !(1..=10000).contains(&config.history_change_window) {
+            bail!("history_change_window must be 1..=10000");
+        }
+        if !(1..=1000000).contains(&config.history_max_scan_rows) {
+            bail!("history_max_scan_rows must be 1..=1000000");
         }
         if !["dark", "light", "mono"].contains(&config.theme.as_str()) {
             bail!("theme must be dark, light, or mono");
@@ -146,6 +161,9 @@ mod tests {
         let path = dir.path().join("config.toml");
         for text in [
             "page_size = 0",
+            "history_page_size = 0",
+            "history_change_window = 10001",
+            "history_max_scan_rows = 0",
             "theme = 'typo'",
             "unknown = 1",
             "[keys]\nquit = 'r'",

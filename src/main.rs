@@ -24,6 +24,9 @@ use std::{
     long_about = "A gitui-inspired Perforce terminal interface. Uses existing p4 environment, P4CONFIG and login tickets. Run inside a configured Perforce workspace."
 )]
 struct Args {
+    /// Initial interactive tab; --tab log avoids the workspace status scan
+    #[arg(long, value_enum, default_value = "status")]
+    tab: Tab,
     /// Directory to use (status/sync/reconcile are scoped to its descendants)
     #[arg(short = 'd', long, default_value = ".")]
     directory: PathBuf,
@@ -48,6 +51,12 @@ struct Args {
     /// Read workspace status as JSON and exit without a terminal
     #[arg(long)]
     status: bool,
+    /// Read one bounded Log window as JSON without loading workspace status
+    #[arg(long, conflicts_with_all = ["status", "check"])]
+    log: bool,
+    /// Inclusive upper changelist bound for --log (otherwise the latest counter)
+    #[arg(long, requires = "log", value_parser = clap::value_parser!(u64).range(1..))]
+    before_change: Option<u64>,
     /// Check connection/workspace and print diagnostics without a terminal
     #[arg(long)]
     check: bool,
@@ -113,6 +122,17 @@ fn run() -> Result<()> {
     connection.user = args.user;
     connection.client = args.client;
     connection.charset = args.charset;
+    if args.log {
+        let cursor = args.before_change.map(|before| p4ui::model::HistoryCursor {
+            before,
+            window: config.history_change_window,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&connection.load_history(Tab::Log, cursor)?)?
+        );
+        return Ok(());
+    }
     if args.status {
         println!(
             "{}",
@@ -149,6 +169,9 @@ fn run() -> Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = App::new(config, connection);
+    if args.tab != Tab::Status {
+        app.switch_tab(args.tab);
+    }
     while !app.quit {
         app.tick()?;
         if shutdown.load(Ordering::Relaxed) && !app.mutating {

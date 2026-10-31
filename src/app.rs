@@ -53,6 +53,7 @@ pub enum Popup {
 }
 
 enum Request {
+    History(Tab, Option<HistoryCursor>, u64),
     Load(Tab, usize),
     ChangeFiles(String, Tab),
     Detail(String, Detail),
@@ -60,6 +61,7 @@ enum Request {
     Edit(FileEntry, String),
 }
 enum Response {
+    History(Tab, Option<HistoryCursor>, u64, Result<View>),
     Load(Tab, Result<View>),
     ChangeFiles(String, Tab, Result<View>),
     Detail(String, Result<String>),
@@ -90,6 +92,9 @@ impl Worker {
         let handle = thread::spawn(move || {
             while let Ok(job) = jobs.recv() {
                 let result = match job {
+                    Request::History(tab, cursor, epoch) => {
+                        Response::History(tab, cursor, epoch, connection.load_history(tab, cursor))
+                    }
                     Request::Load(tab, limit) => Response::Load(tab, connection.load(tab, limit)),
                     Request::ChangeFiles(id, tab) => {
                         Response::ChangeFiles(id.clone(), tab, connection.change_files(&id, tab))
@@ -149,7 +154,9 @@ pub struct App {
     pub target: String,
     pub limit: usize,
     pub drill: Option<String>,
-    parent: Option<(Vec<Item>, usize)>,
+    parent: Option<(View, usize)>,
+    history_more_requested: bool,
+    history_epoch: u64,
     pub last_refresh: Instant,
     worker: Option<Worker>,
     refresh_needed: bool,
@@ -188,6 +195,8 @@ impl App {
             limit,
             drill: None,
             parent: None,
+            history_more_requested: false,
+            history_epoch: 0,
             last_refresh: Instant::now(),
             worker: None,
             refresh_needed: false,
@@ -247,6 +256,18 @@ impl App {
             self.busy = false;
             self.mutating = false;
             match response {
+                Response::History(tab, cursor, epoch, result) => {
+                    if tab == self.tab && self.drill.is_none() && epoch == self.history_epoch {
+                        match result {
+                            Ok(view) => self.apply_history_page(view, cursor.is_some()),
+                            Err(error) => {
+                                self.status = format!("{error:#}");
+                                self.message("History query failed",format!("{error:#}\n\nNo automatic retry. Refresh manually or narrow the history window in config."));
+                            }
+                        }
+                        self.last_refresh = Instant::now();
+                    }
+                }
                 Response::ChangeFiles(id, tab, result) => {
                     if tab == self.tab && self.drill.as_ref() == Some(&id) {
                         match result {
@@ -331,6 +352,7 @@ impl App {
             }
         }
         if self.config.refresh_seconds > 0
+            && !self.tab.is_history()
             && self.drill.is_none()
             && self.popup.is_none()
             && !self.searching
@@ -342,8 +364,17 @@ impl App {
             self.refresh_needed = false;
             if let Some(id) = &self.drill {
                 self.send(Request::ChangeFiles(id.clone(), self.tab))?;
+            } else if self.tab.is_history() {
+                self.history_epoch = self.history_epoch.wrapping_add(1);
+                self.history_more_requested = false;
+                self.send(Request::History(self.tab, None, self.history_epoch))?;
             } else {
                 self.send(Request::Load(self.tab, self.limit))?;
+            }
+        } else if !self.busy && self.history_more_requested {
+            self.history_more_requested = false;
+            if let Some(cursor) = self.view.history.as_ref().and_then(|p| p.next) {
+                self.send(Request::History(self.tab, Some(cursor), self.history_epoch))?;
             }
         } else if !self.busy
             && self.detail_needed
@@ -360,9 +391,81 @@ impl App {
         }
         Ok(())
     }
+    fn apply_history_page(&mut self, mut page: View, append: bool) {
+        let was_empty = self.view.items.is_empty();
+        let key = self.current().map(|item| item.key().to_string());
+        if append {
+            let mut known: std::collections::HashSet<_> = self
+                .view
+                .items
+                .iter()
+                .map(|item| item.key().to_string())
+                .collect();
+            self.view.items.extend(
+                page.items
+                    .drain(..)
+                    .filter(|item| known.insert(item.key().to_string())),
+            );
+            for warning in page.warnings {
+                if !self.view.warnings.contains(&warning) {
+                    self.view.warnings.push(warning);
+                }
+            }
+            self.view.history = page.history;
+            self.view.limit_reached = page.limit_reached;
+        } else {
+            self.view = page;
+        }
+        if self.view.items.len() >= 10000 {
+            self.view.items.truncate(10000);
+            if let Some(page) = &mut self.view.history {
+                page.next = None;
+            }
+            self.view.limit_reached = false;
+            self.view.warnings.push(
+                "10,000 changes cached; refresh or use a narrower scope to bound local memory."
+                    .into(),
+            );
+        }
+        self.selected = key
+            .and_then(|key| self.visible().iter().position(|item| item.key() == key))
+            .unwrap_or(self.selected)
+            .min(self.visible().len().saturating_sub(1));
+        let warnings = if self.view.warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} warnings (?)", self.view.warnings.len())
+        };
+        self.status = if let Some(page) = &self.view.history {
+            format!(
+                "{} changes{warnings} · window {}..{} · scan budget {} · {}",
+                self.view.items.len(),
+                page.first_change,
+                page.last_change,
+                page.requested_scan_limit
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "server policy".into()),
+                if page.next.is_some() {
+                    "+ older"
+                } else {
+                    "end of history"
+                }
+            )
+        } else {
+            format!(
+                "{} changes{warnings} · end of history",
+                self.view.items.len()
+            )
+        };
+        if !append || was_empty {
+            self.detail_needed = true;
+        }
+    }
     pub fn switch_tab(&mut self, tab: Tab) {
         self.drill = None;
         self.parent = None;
+        self.history_more_requested = false;
+        self.history_epoch = self.history_epoch.wrapping_add(1);
         self.tab = tab;
         self.view.items.clear();
         self.selected = 0;
@@ -414,11 +517,11 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if self.drill.take().is_some() {
-                    if let Some((items, selected)) = self.parent.take() {
-                        self.view.items = items;
+                    if let Some((view, selected)) = self.parent.take() {
+                        self.view = view;
                         self.selected = selected;
                     }
-                    self.refresh_needed = true;
+                    self.refresh_needed = !self.tab.is_history();
                 }
                 self.focus_detail = false;
                 self.filter.clear();
@@ -465,7 +568,9 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(Item::Change { id, .. }) = self.current() {
-                    self.parent = Some((std::mem::take(&mut self.view.items), self.selected));
+                    self.parent = Some((self.view.clone(), self.selected));
+                    self.view.items.clear();
+                    self.view.history = None;
                     self.drill = Some(id);
                     self.selected = 0;
                     self.filter.clear();
@@ -479,6 +584,20 @@ impl App {
             KeyCode::F(5) => self.refresh_needed = true,
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 self.switch_tab(Tab::ALL[c as usize - '1' as usize])
+            }
+            KeyCode::Char('+') if self.tab.is_history() => {
+                if self.drill.is_some() {
+                    self.status =
+                        "Affected files are limited to 200; use p4 describe for the complete list."
+                            .into();
+                } else if self.busy {
+                    self.status =
+                        "Wait for the current request before fetching another history page.".into();
+                } else if self.view.history.as_ref().and_then(|p| p.next).is_some() {
+                    self.history_more_requested = true;
+                } else {
+                    self.status = "End of history; r checks for new changes.".into();
+                }
             }
             KeyCode::Char('+') => {
                 self.limit = (self.limit + self.config.page_size).min(10000);
@@ -810,6 +929,91 @@ mod tests {
         assert!(matches!(app.popup, Some(Popup::Confirm { .. })));
         app.key(key('n')).unwrap();
         assert!(app.popup.is_none());
+    }
+    fn history_view(id: &str, next: Option<HistoryCursor>) -> View {
+        View {
+            items: vec![Item::Change {
+                id: id.into(),
+                description: "test".into(),
+                user: "user".into(),
+                client: "client".into(),
+                status: "submitted".into(),
+            }],
+            history: Some(HistoryPage {
+                first_change: 1,
+                last_change: 100,
+                next,
+                requested_scan_limit: Some(50000),
+                group_scan_limit: None,
+            }),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn history_load_more_appends_and_drilldown_retains_the_cursor() {
+        let mut app = App::for_view(
+            Config::default(),
+            history_view(
+                "100",
+                Some(HistoryCursor {
+                    before: 99,
+                    window: 10,
+                }),
+            ),
+        );
+        app.tab = Tab::Log;
+        app.key(key('+')).unwrap();
+        assert!(app.history_more_requested);
+        assert_eq!(app.limit, 200);
+        app.history_more_requested = false;
+        let mut page = history_view(
+            "90",
+            Some(HistoryCursor {
+                before: 89,
+                window: 10,
+            }),
+        );
+        page.items.push(app.view.items[0].clone());
+        app.apply_history_page(page, true);
+        assert_eq!(app.view.items.len(), 2);
+        assert_eq!(app.view.items[0].key(), "100");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.drill.is_some());
+        app.view = View::default();
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.view.items.len(), 2);
+        assert_eq!(
+            app.view
+                .history
+                .as_ref()
+                .and_then(|page| page.next)
+                .map(|c| c.before),
+            Some(89)
+        );
+        assert!(!app.refresh_needed);
+    }
+    #[test]
+    fn history_does_not_poll_automatically_or_queue_more_while_busy() {
+        let mut app = App::for_view(
+            Config::default(),
+            history_view(
+                "100",
+                Some(HistoryCursor {
+                    before: 99,
+                    window: 10,
+                }),
+            ),
+        );
+        app.tab = Tab::Log;
+        app.detail_needed = false;
+        app.last_refresh = Instant::now() - Duration::from_secs(60);
+        app.tick().unwrap();
+        assert!(!app.refresh_needed);
+        app.busy = true;
+        app.key(key('+')).unwrap();
+        assert!(!app.history_more_requested);
     }
     #[test]
     fn unicode_input_and_search_are_safe() {

@@ -24,6 +24,8 @@ cargo run --release -- -d /path/to/workspace
 p4ui -p ssl:perforce.example.com:1666 -u alice -c alice-workspace
 p4ui --check               # connection/workspace diagnostics
 p4ui --status              # machine-readable workspace status, no TTY needed
+p4ui --log                 # one bounded history window as JSON; no workspace scan
+p4ui --tab log             # open directly in Log without loading Status
 p4ui --help
 ```
 
@@ -50,7 +52,7 @@ See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac 
 2. For tracked files, use **Files**, press `e` to open for edit, or `o` to open for edit and launch your editor. Editor selection is `P4EDITOR`, `VISUAL`, `EDITOR`, then `vi` (`notepad` on Windows). Commands with quoted arguments are supported; shell pipelines/expansion are not evaluated.
 3. In **Changes**, press `n` to create a numbered changelist. Select it and press `Space` to make it the target for subsequent file actions. In Status, `m` moves an opened file to a chosen changelist.
 4. Press `c` to submit. The default changelist asks for a description; numbered changelists use their saved description (`E` edits it). Multiline inputs use Enter for a newline and **Ctrl-S** to accept. All submissions require explicit `y` confirmation.
-5. Use **Log** to inspect submitted changes. Enter drills into the file list; select a file for its revision-specific diff. `Esc` returns. Shelves and pending changes support the same drilldown.
+5. Use **Log** to inspect submitted change summaries. Enter drills into the first 200 affected files; select a file for its revision-specific diff. `Esc` returns. Shelves and pending changes support the same drilldown.
 6. `s` in Changes shelves a numbered changelist. Shelving keeps the files open; revert separately when ready. `u` in Shelves unshelves into a chosen pending change. Existing shelf content is never force-overwritten.
 7. `f` syncs to depot HEAD after confirmation. **Resolve** lists unresolved files; `R` chooses safe automatic resolve, merge, yours, or theirs. Conflicts left by auto resolve require your merge tool and `p4 resolve`.
 
@@ -60,7 +62,7 @@ The result of a failed submit can be a newly numbered pending changelist. Refres
 
 ## Keys
 
-`?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, `+` increases the server query limit, `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
+`?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, `+` fetches the next older window in Log/Shelves (and increases the result limit in other tabs), `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
 
 | Tab | Commands |
 | --- | --- |
@@ -83,10 +85,13 @@ Stream commands require a stream workspace and follow server flow/permission rul
 The default path is `$XDG_CONFIG_HOME/p4ui/config.toml` or `~/.config/p4ui/config.toml`; on Windows, `%APPDATA%/p4ui/config.toml`. Use `--config path` to override. Missing default configuration is fine; unknown fields, unsupported themes, and conflicting key bindings are errors.
 
 ```toml
-refresh_seconds = 10          # 0 disables automatic refresh
+refresh_seconds = 10          # 0 disables automatic refresh; Log/Shelves refresh manually
 command_timeout_seconds = 120 # 1..3600, including submits and large syncs
 max_output_mb = 16            # 1..256 per command/preview
-page_size = 200               # 10..10000; + raises it for the current session
+page_size = 200               # non-history tabs: 10..10000; + raises it
+history_page_size = 50        # 1..200 changelists per history request
+history_change_window = 1000  # 1..10000 changelist IDs per bounded history window
+history_max_scan_rows = 50000 # 1..1000000; request no more than reported group limit
 theme = "dark"               # dark, light, mono
 
 [keys]
@@ -95,6 +100,16 @@ quit = "Q"
 ```
 
 Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
+
+## History on large depots
+
+Log and Shelves use explicit changelist ranges and a cursor; `+` fetches older data and appends it without refetching earlier pages. They never automatically poll or walk the entire history. `r` starts again at the latest change counter. A quiet branch can have empty windows: `+` continues to an older window. The status bar shows the last window and requested scan budget. Filters search the cached rows only; at most 10,000 changes are cached.
+
+`p4 changes -m N` limits returned changes, not necessarily the number of file revisions scanned. p4ui reads the user's group limits and requests the lower of `history_max_scan_rows` and the reported effective `MaxScanRows`; the page size is also capped by a reported `MaxResults`. It does not change server/group settings or request higher group limits. If group metadata is unavailable/incomplete, it leaves server limits unchanged and reports a warning. There is no cheap, reliable total row count for a workspace history query; changelist numbers and scan rows are different measures. See Perforce's [query limit documentation](https://help.perforce.com/helix-core/server-apps/p4sag/current/Content/P4SAG/performance.prevention.query_limits.html) for the server controls.
+
+Perforce can ignore per-command limit requests (`server.commandlimits=2`); bounded revision ranges still apply. A resource-limit failure never causes an automatic retry. `+` tries the same upper bound with a smaller window. If even one change exceeds the budget, it is explicitly reported as skipped and `+` can continue before it. Use a narrower launch directory or the P4 CLI to inspect an oversized change. Automatic change previews omit diffs and show at most 200 files, keeping large commits from triggering another unbounded read.
+
+For read-only diagnostics, `p4ui --log` emits one window as JSON, including `history.next`, requested/group limits and warnings. `p4ui --log --before-change 12345` starts at an explicit upper changelist bound.
 
 ## Development
 

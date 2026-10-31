@@ -25,6 +25,9 @@ pub struct Connection {
     pub charset: Option<String>,
     pub timeout: Duration,
     pub max_output: u64,
+    pub history_page_size: usize,
+    pub history_change_window: u64,
+    pub history_max_scan_rows: u64,
     /// Used by isolated integration fixtures; normal operation inherits P4 settings.
     pub environment: Vec<(String, String)>,
     pub cancelled: Arc<AtomicBool>,
@@ -43,6 +46,9 @@ impl Connection {
             charset: None,
             timeout: Duration::from_secs(config.command_timeout_seconds),
             max_output: config.max_output_mb as u64 * 1024 * 1024,
+            history_page_size: config.history_page_size,
+            history_change_window: config.history_change_window,
+            history_max_scan_rows: config.history_max_scan_rows,
             environment: Vec::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
@@ -212,52 +218,36 @@ impl Connection {
                     });
                 }
             }
-            Tab::Log | Tab::Changes | Tab::Shelves => {
-                let mut args = vec![
-                    "changes",
-                    "-l",
-                    "-m",
-                    &n,
-                    "-s",
-                    if tab == Tab::Log {
-                        "submitted"
-                    } else if tab == Tab::Shelves {
-                        "shelved"
-                    } else {
-                        "pending"
-                    },
-                ];
-                if tab == Tab::Changes {
-                    args.extend([
+            Tab::Log | Tab::Shelves => return self.history_with_info(view.info, tab, None),
+            Tab::Changes => {
+                let records = self.listing_records(
+                    &[
+                        "changes",
+                        "-l",
+                        "-m",
+                        &n,
+                        "-s",
+                        "pending",
                         "-c",
-                        view.info.client.as_str(),
+                        &view.info.client,
                         "-u",
-                        view.info.user.as_str(),
-                    ]);
-                }
-                // Pending lists include empty changelists, which have no path association.
-                if tab != Tab::Changes {
-                    args.push(scope);
-                }
-                let records = self.listing_records(&args, &mut view.warnings)?;
-                if tab == Tab::Changes {
-                    view.items.push(Item::Change {
-                        id: "default".into(),
-                        description: "Default changelist".into(),
-                        user: view.info.user.clone(),
-                        client: view.info.client.clone(),
-                        status: "pending".into(),
-                    });
-                }
-                for r in records.iter().filter(|r| r.get("change").is_some()) {
-                    view.items.push(Item::Change {
-                        id: field(r, "change"),
-                        description: field(r, "desc"),
-                        user: field(r, "user"),
-                        client: field(r, "client"),
-                        status: field(r, "status"),
-                    });
-                }
+                        &view.info.user,
+                    ],
+                    &mut view.warnings,
+                )?;
+                view.items.push(Item::Change {
+                    id: "default".into(),
+                    description: "Default changelist".into(),
+                    user: view.info.user.clone(),
+                    client: view.info.client.clone(),
+                    status: "pending".into(),
+                });
+                view.items.extend(
+                    records
+                        .iter()
+                        .filter(|r| r.get("change").is_some())
+                        .map(change_item),
+                );
                 view.limit_reached = records.len() >= limit;
             }
             Tab::Files => {
@@ -309,6 +299,160 @@ impl Connection {
         }
         Ok(view)
     }
+    pub fn load_history(&self, tab: Tab, cursor: Option<HistoryCursor>) -> Result<View> {
+        ensure!(
+            tab.is_history(),
+            "History paging is only available in Log and Shelves"
+        );
+        self.history_with_info(self.info()?, tab, cursor)
+    }
+    fn history_with_info(
+        &self,
+        info: Info,
+        tab: Tab,
+        cursor: Option<HistoryCursor>,
+    ) -> Result<View> {
+        let mut view = View {
+            info,
+            ..Default::default()
+        };
+        // Group metadata is cheap compared with revision history. Never increase
+        // a reported admin limit, including on servers permitting overrides.
+        let groups = self.records(&["groups", "-i", "-v", "-m", "1000", &view.info.user]);
+        let (scan_limit, group_limit, page_size) = match groups {
+            Ok(groups)
+                if groups.len() < 1000
+                    && groups.iter().all(|r| {
+                        ["maxScanRows", "maxResults"].iter().all(|key| {
+                            let value = field(r, key);
+                            value.parse::<u64>().is_ok()
+                                || matches!(
+                                    value.to_ascii_lowercase().as_str(),
+                                    "unset" | "unlimited" | "-1"
+                                )
+                        })
+                    }) =>
+            {
+                let scan = group_limit(&groups, "maxScanRows");
+                let results = group_limit(&groups, "maxResults");
+                let page = results
+                    .map(|r| self.history_page_size.min(r as usize))
+                    .unwrap_or(self.history_page_size)
+                    .max(1);
+                (
+                    Some(
+                        scan.map(|r| r.min(self.history_max_scan_rows))
+                            .unwrap_or(self.history_max_scan_rows),
+                    ),
+                    scan,
+                    page,
+                )
+            }
+            _ => {
+                view.warnings.push("Could not determine complete group limits; leaving server limits unchanged and using a bounded changelist window.".into());
+                (None, None, self.history_page_size)
+            }
+        };
+        let prefix = scan_limit.map(|limit| format!("-zmaxScanRows={limit}"));
+        let read = |args: &[&str]| -> Result<Vec<Value>> {
+            let mut bounded = Vec::new();
+            if let Some(prefix) = &prefix {
+                bounded.push(prefix.as_str());
+            }
+            bounded.extend_from_slice(args);
+            self.records(&bounded)
+        };
+        let upper = if let Some(cursor) = cursor {
+            cursor.before
+        } else {
+            // The global counter is an O(1) high-water mark and also includes
+            // pending shelves newer than the latest submitted changelist.
+            read(&["counter", "change"])?
+                .iter()
+                .filter_map(|r| field(r, "value").parse::<u64>().ok())
+                .max()
+                .unwrap_or(0)
+        };
+        if upper == 0 {
+            return Ok(view);
+        }
+        let window = cursor
+            .map(|c| c.window)
+            .unwrap_or(self.history_change_window)
+            .clamp(1, self.history_change_window);
+        let lower = upper.saturating_sub(window - 1).max(1);
+        let scope = format!("...@{lower},@{upper}");
+        let page = page_size.clamp(1, 200).to_string();
+        let result = read(&[
+            "changes",
+            "-L",
+            "-m",
+            &page,
+            "-s",
+            if tab == Tab::Log {
+                "submitted"
+            } else {
+                "shelved"
+            },
+            &scope,
+        ]);
+        let next = match result {
+            Ok(records) => {
+                let mut changes: Vec<_> = records
+                    .iter()
+                    .filter(|r| r.get("change").is_some())
+                    .collect();
+                changes.sort_by_key(|r| {
+                    std::cmp::Reverse(field(r, "change").parse::<u64>().unwrap_or(0))
+                });
+                let before = if changes.len() >= page_size {
+                    changes
+                        .last()
+                        .and_then(|r| field(r, "change").parse::<u64>().ok())
+                        .unwrap_or(lower)
+                        .saturating_sub(1)
+                } else {
+                    lower.saturating_sub(1)
+                };
+                view.items.extend(changes.into_iter().map(change_item));
+                (before > 0).then_some(HistoryCursor { before, window })
+            }
+            Err(error)
+                if error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("maxscanrows")
+                    || error
+                        .to_string()
+                        .to_ascii_lowercase()
+                        .contains("maxresults") =>
+            {
+                if window > 1 {
+                    view.warnings.push(format!("History scan stopped at a server resource limit. No automatic retry; + retries this range with a smaller window. {error:#}"));
+                    Some(HistoryCursor {
+                        before: upper,
+                        window: (window / 2).max(1),
+                    })
+                } else {
+                    view.warnings.push(format!("Change {upper} exceeds the history query budget and was skipped; + continues before it. Inspect this change with the p4 CLI if needed. {error:#}"));
+                    (upper > 1).then_some(HistoryCursor {
+                        before: upper - 1,
+                        window: self.history_change_window,
+                    })
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        view.history = Some(HistoryPage {
+            first_change: lower,
+            last_change: upper,
+            next,
+            requested_scan_limit: scan_limit,
+            group_scan_limit: group_limit,
+        });
+        view.limit_reached = next.is_some();
+        Ok(view)
+    }
     pub fn change_files(&self, id: &str, tab: Tab) -> Result<View> {
         validate_change(id, true)?;
         let info = self.info()?;
@@ -321,7 +465,7 @@ impl Connection {
                 }
             }
         } else {
-            let mut args = vec!["describe", "-s"];
+            let mut args = vec!["describe", "-s", "-m", "200"];
             if tab == Tab::Shelves {
                 args.push("-S");
             }
@@ -340,9 +484,16 @@ impl Connection {
                 }
             }
         }
+        let limited = tab != Tab::Changes && items.len() >= 200;
         Ok(View {
             info,
             items,
+            warnings: if limited {
+                vec!["Showing the first 200 affected files; use p4 describe for the complete change.".into()]
+            } else {
+                Vec::new()
+            },
+            limit_reached: limited,
             ..Default::default()
         })
     }
@@ -409,11 +560,11 @@ impl Connection {
                     return self.text(&["opened", "-c", "default"]);
                 }
                 if tab == Tab::Changes {
-                    self.text(&["describe", "-s", &id])
+                    self.text(&["describe", "-s", "-m", "200", &id])
                 } else if tab == Tab::Shelves {
-                    self.text(&["describe", "-S", "-du", &id])
+                    self.text(&["describe", "-S", "-s", "-m", "200", &id])
                 } else {
-                    self.text(&["describe", "-du", &id])
+                    self.text(&["describe", "-s", "-m", "200", &id])
                 }
             }
             Detail::Item(Item::Stream { path, .. }, _) => self.text(&["stream", "-o", &path]),
@@ -692,6 +843,33 @@ impl Connection {
     }
 }
 
+fn change_item(r: &Value) -> Item {
+    Item::Change {
+        id: field(r, "change"),
+        description: field(r, "desc"),
+        user: field(r, "user"),
+        client: field(r, "client"),
+        status: field(r, "status"),
+    }
+}
+/// P4 uses the highest finite limit across groups; any unlimited group removes
+/// the group cap. Zero/unset does not override a finite limit from another group.
+fn group_limit(groups: &[Value], key: &str) -> Option<u64> {
+    if groups.iter().any(|r| {
+        matches!(
+            field(r, key).to_ascii_lowercase().as_str(),
+            "unlimited" | "-1"
+        )
+    }) {
+        return None;
+    }
+    groups
+        .iter()
+        .filter_map(|r| field(r, key).parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .max()
+}
+
 pub fn field(r: &Value, key: &str) -> String {
     match r.get(key) {
         Some(Value::String(s)) => s.clone(),
@@ -918,6 +1096,19 @@ mod tests {
             connection.directory.to_string_lossy().replace('\\', "/"),
             "/logical/link/../workspace"
         );
+    }
+    #[test]
+    fn effective_group_limits_ignore_unset_and_honor_unlimited() {
+        let groups = vec![
+            serde_json::json!({"maxScanRows":"0"}),
+            serde_json::json!({"maxScanRows":"80"}),
+            serde_json::json!({"maxScanRows":"120"}),
+        ];
+        assert_eq!(group_limit(&groups, "maxScanRows"), Some(120));
+        let mut groups = groups;
+        groups.push(serde_json::json!({"maxScanRows":"-1"}));
+        assert_eq!(group_limit(&groups, "maxScanRows"), None);
+        assert_eq!(group_limit(&[], "maxScanRows"), None);
     }
     #[test]
     fn description_preserves_jobs_and_files_and_prevents_form_injection() {

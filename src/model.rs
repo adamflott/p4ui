@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 pub enum Tab {
     #[default]
     Status,
@@ -25,6 +25,9 @@ impl Tab {
         Self::Workspaces,
         Self::Labels,
     ];
+    pub fn is_history(self) -> bool {
+        matches!(self, Self::Log | Self::Shelves)
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Status => "Status",
@@ -130,12 +133,30 @@ impl Item {
     }
 }
 
+/// The next inclusive upper changelist bound, with a window that can shrink
+/// after a server resource limit. No automatic scan of earlier windows occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryCursor {
+    pub before: u64,
+    pub window: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryPage {
+    pub first_change: u64,
+    pub last_change: u64,
+    pub next: Option<HistoryCursor>,
+    pub requested_scan_limit: Option<u64>,
+    pub group_scan_limit: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct View {
     pub info: Info,
     pub items: Vec<Item>,
     pub warnings: Vec<String>,
     pub limit_reached: bool,
+    #[serde(default)]
+    pub history: Option<HistoryPage>,
 }
 
 #[derive(Debug, Clone)]

@@ -16,6 +16,9 @@
 - Client selection, label/stream listing and current-directory/ignore scoping.
 - Default / dot-suffixed launch directories without spurious illegal-filename warnings; lexical cleanup preserves symlink spelling.
 - Invalid workspaces, output limits and permission failures.
+- Cursor paging through sparse scoped history without duplicate/missing changes, including empty windows.
+- Reported group-limit clamping, bounded ranges, non-retrying resource failures and retained fatal permission errors.
+- Appending pages while preserving selection and drilldown cursors; history does not automatically poll or queue concurrent pages.
 - CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.
 - Concurrent edits from two workspaces, failed submits, safe resolve preserving conflicts, explicit resolution and successful resubmit.
 - Dirty-workspace switch rejection, stream creation/deletion, branch population, parent merge and copy promotion under normal stream flow rules.
