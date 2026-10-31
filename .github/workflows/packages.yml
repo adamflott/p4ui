@@ -16,10 +16,12 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git curl ca-certificates debhelper dpkg-dev fakeroot python3
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - name: Assemble locked vendored source
-        run: ./scripts/vendor-source.sh
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./scripts/vendor-source.sh
       - name: Build and inspect package
         run: |
           mkdir -p dist/deb-build
@@ -31,7 +33,7 @@ jobs:
           dpkg -i p4ui_*.deb
           p4ui --version
           cp p4ui_*.deb "$GITHUB_WORKSPACE/dist/"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: p4ui-deb-x86_64
           path: dist/*.deb
@@ -43,9 +45,11 @@ jobs:
     steps:
       - name: Install build tools
         run: dnf install -y gcc git cargo rust rpm-build python3 tar gzip findutils
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Assemble locked vendored source
-        run: ./scripts/vendor-source.sh
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./scripts/vendor-source.sh
       - name: Build and inspect package
         run: |
           mkdir -p dist/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
@@ -55,7 +59,7 @@ jobs:
           rpm -qip dist/rpmbuild/RPMS/*/p4ui-*.rpm
           dnf install -y dist/rpmbuild/RPMS/*/p4ui-*.rpm
           p4ui --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: p4ui-rpm-x86_64
           path: |
@@ -69,9 +73,11 @@ jobs:
     steps:
       - name: Install build tools
         run: pacman -Syu --noconfirm --needed git rust python
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Assemble locked vendored source
-        run: ./scripts/vendor-source.sh
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./scripts/vendor-source.sh
       - name: Build and inspect package as an unprivileged user
         run: |
           python3 scripts/prepare-arch.py dist/p4ui-*.tar.gz "$RUNNER_TEMP/arch-build"
@@ -81,7 +87,7 @@ jobs:
           pacman -U --noconfirm "$RUNNER_TEMP"/arch-build/p4ui-*.pkg.tar.zst
           p4ui --version
           cp "$RUNNER_TEMP"/arch-build/p4ui-*.pkg.tar.zst dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: p4ui-arch-x86_64
           path: dist/*.pkg.tar.zst
