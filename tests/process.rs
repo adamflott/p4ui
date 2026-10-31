@@ -1,6 +1,6 @@
 //! Verify failure boundaries with a deliberately broken/hanging CLI.
 #![cfg(unix)]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use p4ui::{config::Config, p4::Connection};
 use std::{
     os::unix::fs::PermissionsExt,
@@ -69,120 +69,105 @@ else:
     Ok(())
 }
 fn history_fake(mode: &str) -> Result<(tempfile::TempDir, Connection)> {
-    let source = r#"import json,sys,os,pathlib
-with pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
-if 'info' in sys.argv:
+    let source = r#"import json,sys,os,pathlib,time
+args=sys.argv[1:]
+with pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write(json.dumps(args)+'\n')
+mode=os.environ['MODE']
+if 'info' in args:
  print(json.dumps({'userName':'tester','clientName':'test','clientRoot':'/workspace'}))
-elif 'groups' in sys.argv:
- if os.environ['MODE']=='groups_denied':
+elif 'groups' in args:
+ if mode=='groups_denied':
   print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
  print(json.dumps({'group':'bounded','maxScanRows':'80','maxResults':'3'}))
-elif 'counter' in sys.argv: print(json.dumps({'value':'10000'}))
-elif 'fstat' in sys.argv:
- assert sys.argv[sys.argv.index('-T')+1]=='headChange'
- assert '-Os' in sys.argv and '-m' in sys.argv
- if os.environ['MODE']=='head_limit':
+elif 'changes' in args:
+ scope=args[-1]
+ assert scope=='...' or (scope.startswith('...@') and scope[4:].isdigit()), 'Unexpected history scope'
+ if mode=='groups_denied': assert not any(arg.startswith('-zmaxScanRows=') for arg in args)
+ for arg in args:
+  if arg.startswith('-zmaxScanRows='): assert int(arg.split('=')[1])<=80
+ if mode=='limit' or (mode=='fail_older' and scope!='...'):
+  print(json.dumps({'change':'9999','desc':'partial result'}))
   print(json.dumps({'severity':3,'generic':35,'data':'Too many rows scanned; see p4 help maxscanrows.'}));sys.exit(1)
- if os.environ['MODE']=='head_truncated':
-  for change in ['1','2','3']: print(json.dumps({'headChange':change}))
- else: print(json.dumps({'headChange':'10000'}))
-elif 'changes' in sys.argv:
- assert any(arg.startswith('...@') and ',@' in arg for arg in sys.argv), 'Unbounded history query'
- if os.environ['MODE']=='groups_denied': assert not any(arg.startswith('-zmaxScanRows=') for arg in sys.argv)
- else:
-  assert '-zmaxScanRows=80' in sys.argv
-  assert sys.argv[sys.argv.index('-m')+1]=='3'
- if os.environ['MODE']=='limit':
-  print(json.dumps({'severity':3,'generic':35,'data':'Too many rows scanned (over 80); see p4 help maxscanrows.'}));sys.exit(1)
- if os.environ['MODE']=='permission':
+ if mode=='permission':
   print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
- for change in ['9999','9995','9991']:
-  print(json.dumps({'change':change,'desc':'example','user':'tester','client':'test','status':'submitted'}))
+ changes=list(range(100000000,100000000-240*1009,-1009)) if mode in ('many','fail_older','slow_status') else [9999,9995,9991]
+ before=int(scope[4:]) if scope!='...' else 2**63
+ maximum=int(args[args.index('-m')+1]);assert 1<=maximum<=200
+ for change in [change for change in changes if change<=before][:maximum]:
+  print(json.dumps({'change':str(change),'desc':'example','user':'tester','client':'test','status':'submitted'}))
+elif 'fstat' in args and mode=='slow_status':
+ assert '-Ro' in args
+ pathlib.Path(__file__).with_suffix('.started').touch()
+ time.sleep(10)
+elif 'sync' in args and mode=='slow_mutation':
+ pathlib.Path(__file__).with_suffix('.started').touch()
+ time.sleep(0.3)
+ print(json.dumps({'data':'Mutation completed'}))
+elif 'describe' in args:
+ print('Change summary')
+else:
+ raise AssertionError('Unexpected command: '+repr(args))
 "#;
     let (dir, mut connection) = fake(source)?;
     connection.environment.push(("MODE".into(), mode.into()));
     Ok((dir, connection))
 }
 #[test]
-fn history_uses_bounded_ranges_and_never_raises_admin_limits() -> Result<()> {
+fn history_pages_actual_changes_without_head_lookups_or_counter_windows() -> Result<()> {
     use p4ui::model::Tab;
-    let (_dir, c) = history_fake("success")?;
+    let (_dir, mut c) = history_fake("many")?;
+    c.history_page_size = 32;
+    let first = c.load_history(Tab::Log, None)?;
+    assert_eq!(first.items.len(), 32);
+    let page = first
+        .history
+        .ok_or_else(|| anyhow::anyhow!("Missing page"))?;
+    assert_eq!(page.requested_scan_limit, None);
+    let cursor = page.next.ok_or_else(|| anyhow::anyhow!("Missing cursor"))?;
+    assert_eq!(
+        cursor.before,
+        first
+            .items
+            .last()
+            .context("Missing last change")?
+            .key()
+            .parse::<u64>()?
+            - 1
+    );
+    let older = c.load_history(Tab::Log, Some(cursor))?;
+    assert_eq!(older.items.len(), 32);
+    for item in &older.items {
+        assert!(item.key().parse::<u64>()? <= cursor.before);
+    }
+    let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
+    assert!(!calls.contains("fstat") && !calls.contains("counter") && !calls.contains("groups"));
+    assert!(calls.contains(&format!("...@{}", cursor.before)));
+    Ok(())
+}
+#[test]
+fn optional_history_scan_budget_never_raises_reported_admin_limits() -> Result<()> {
+    use p4ui::model::Tab;
+    let (_dir, mut c) = history_fake("success")?;
+    c.history_max_scan_rows = 50000;
     let view = c.load_history(Tab::Log, None)?;
     let page = view
         .history
-        .ok_or_else(|| anyhow::anyhow!("Missing history metadata"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing page"))?;
     assert_eq!(page.requested_scan_limit, Some(80));
     assert_eq!(page.group_scan_limit, Some(80));
     assert_eq!(view.items.len(), 3);
     assert_eq!(page.next.map(|cursor| cursor.before), Some(9990));
     let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
-    assert!(calls.contains("...@9001,@10000"));
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.contains("\"changes\""))
-            .count(),
-        1
-    );
+    assert!(calls.contains("-zmaxScanRows=80"));
     Ok(())
 }
 #[test]
-fn resource_failure_returns_smaller_cursor_without_automatic_retries() -> Result<()> {
+fn history_errors_do_not_return_partial_pages_or_automatically_retry() -> Result<()> {
     use p4ui::model::Tab;
-    let (_dir, c) = history_fake("limit")?;
-    let view = c.load_history(Tab::Log, None)?;
-    assert!(view.items.is_empty());
-    assert_eq!(view.warnings.len(), 1);
-    let next = view
-        .history
-        .and_then(|page| page.next)
-        .ok_or_else(|| anyhow::anyhow!("Expected retry cursor"))?;
-    assert_eq!(next.before, 10000);
-    assert_eq!(next.window, 500);
-    let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.contains("\"changes\""))
-            .count(),
-        1
-    );
-    Ok(())
-}
-#[test]
-fn history_permission_failures_are_fatal_and_unknown_limits_are_not_overridden() -> Result<()> {
-    use p4ui::model::Tab;
-    let (_dir, c) = history_fake("permission")?;
-    assert!(c.load_history(Tab::Log, None).is_err());
-    let (_dir, c) = history_fake("groups_denied")?;
-    let view = c.load_history(Tab::Log, None)?;
-    assert!(!view.warnings.is_empty());
-    assert_eq!(
-        view.history.and_then(|page| page.requested_scan_limit),
-        None
-    );
-    Ok(())
-}
-#[test]
-fn history_lookup_limits_do_not_silently_skip_newer_changes() -> Result<()> {
-    use p4ui::model::Tab;
-    for mode in ["head_limit", "head_truncated"] {
+    for mode in ["limit", "permission"] {
         let (_dir, c) = history_fake(mode)?;
-        let view = c.load_history(Tab::Log, None)?;
-        assert!(
-            view.warnings
-                .iter()
-                .any(|warning| warning.contains("falling back"))
-        );
-        assert_eq!(view.history.map(|page| page.last_change), Some(10000));
+        assert!(c.load_history(Tab::Log, None).is_err());
         let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
-        assert_eq!(
-            calls
-                .lines()
-                .filter(|line| line.contains("\"fstat\""))
-                .count(),
-            1
-        );
         assert_eq!(
             calls
                 .lines()
@@ -191,5 +176,205 @@ fn history_lookup_limits_do_not_silently_skip_newer_changes() -> Result<()> {
             1
         );
     }
+    let (_dir, mut c) = history_fake("groups_denied")?;
+    c.history_max_scan_rows = 50000;
+    let view = c.load_history(Tab::Log, None)?;
+    assert!(!view.warnings.is_empty());
+    assert_eq!(
+        view.history.and_then(|page| page.requested_scan_limit),
+        None
+    );
+    Ok(())
+}
+
+fn drive_app(app: &mut p4ui::app::App, ready: impl Fn(&p4ui::app::App) -> bool) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.tick()?;
+        if ready(app) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "App did not settle: {}",
+            app.status
+        );
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+fn history_queries(path: &std::path::Path) -> Result<Vec<Vec<String>>> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let calls: Vec<Vec<String>> = text
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<serde_json::Result<_>>()?;
+    Ok(calls
+        .into_iter()
+        .filter(|args| args.iter().any(|arg| arg == "changes"))
+        .collect())
+}
+#[test]
+fn history_fills_viewport_and_pages_on_keyboard_wheel_and_resize() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{app::App, model::Tab};
+    let (_dir, c) = history_fake("many")?;
+    let log = c.executable.with_extension("calls");
+    let mut app = App::new(Config::default(), c);
+    app.set_history_rows(24);
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| app.view.items.len() == 24 && !app.busy)?;
+    assert!(app.popup.is_none());
+    let first: Vec<_> = app
+        .view
+        .items
+        .iter()
+        .map(|item| item.key().to_owned())
+        .collect();
+    let calls = history_queries(&log)?;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].windows(2).any(|args| args == ["-m", "24"]));
+    assert_eq!(calls[0].last().map(String::as_str), Some("..."));
+    app.last_refresh = Instant::now() - Duration::from_secs(60);
+    for _ in 0..5 {
+        app.tick()?;
+    }
+    assert_eq!(
+        history_queries(&log)?.len(),
+        1,
+        "Idle history must not fetch another page"
+    );
+    app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    drive_app(&mut app, |app| app.view.items.len() == 48 && !app.busy)?;
+    assert_eq!(
+        app.selected, 23,
+        "Appending must preserve the selected change"
+    );
+    assert_eq!(
+        &first,
+        &app.view.items[..24]
+            .iter()
+            .map(|item| item.key().to_owned())
+            .collect::<Vec<_>>()
+    );
+    let calls = history_queries(&log)?;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].last().context("Missing scope")?,
+        &format!(
+            "...@{}",
+            first.last().context("Missing change")?.parse::<u64>()? - 1
+        )
+    );
+    app.scroll(100, true);
+    drive_app(&mut app, |app| app.view.items.len() == 72 && !app.busy)?;
+    app.set_history_rows(80);
+    drive_app(&mut app, |app| app.view.items.len() == 80 && !app.busy)?;
+    let calls = history_queries(&log)?;
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].windows(2).any(|args| args == ["-m", "8"]));
+    let ids: std::collections::HashSet<_> = app.view.items.iter().map(|item| item.key()).collect();
+    assert_eq!(ids.len(), 80, "Pagination must not repeat cached changes");
+    let commands = std::fs::read_to_string(&log)?;
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line.contains("\"info\""))
+            .count(),
+        1,
+        "Older pages must reuse connection metadata"
+    );
+    assert!(
+        !commands.contains("fstat")
+            && !commands.contains("counter")
+            && !commands.contains("groups")
+    );
+    app.filter = "no matching changes".into();
+    app.set_history_rows(100);
+    app.scroll(100, true);
+    for _ in 0..5 {
+        app.tick()?;
+    }
+    assert_eq!(
+        history_queries(&log)?.len(),
+        4,
+        "Filtering must not automatically scan more history"
+    );
+    Ok(())
+}
+#[test]
+fn failed_history_page_preserves_cache_and_pauses_scroll_paging() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{app::App, model::Tab};
+    let (_dir, c) = history_fake("fail_older")?;
+    let log = c.executable.with_extension("calls");
+    let mut app = App::new(Config::default(), c);
+    app.set_history_rows(24);
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| app.view.items.len() == 24 && !app.busy)?;
+    let cursor = app.view.history.as_ref().and_then(|page| page.next);
+    app.scroll(100, true);
+    drive_app(&mut app, |app| app.popup.is_some() && !app.busy)?;
+    assert_eq!(app.view.items.len(), 24);
+    assert_eq!(app.view.history.as_ref().and_then(|page| page.next), cursor);
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.scroll(100, true);
+    app.set_history_rows(80);
+    for _ in 0..5 {
+        app.tick()?;
+    }
+    assert_eq!(
+        history_queries(&log)?.len(),
+        2,
+        "A failed page must not be retried automatically"
+    );
+    app.key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))?;
+    drive_app(&mut app, |app| app.popup.is_some() && !app.busy)?;
+    assert_eq!(
+        history_queries(&log)?.len(),
+        3,
+        "Explicit retry must still work"
+    );
+    Ok(())
+}
+#[test]
+fn switching_to_log_cancels_a_slow_status_read() -> Result<()> {
+    use p4ui::{app::App, model::Tab};
+    let (_dir, c) = history_fake("slow_status")?;
+    let started = c.executable.with_extension("started");
+    let mut app = App::new(Config::default(), c);
+    app.set_history_rows(24);
+    drive_app(&mut app, |_| started.exists())?;
+    let start = Instant::now();
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| app.view.items.len() == 24 && !app.busy)?;
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "Log waited for the 10-second Status command"
+    );
+    assert!(app.popup.is_none());
+    Ok(())
+}
+
+#[test]
+fn tab_switch_preserves_an_active_mutating_command() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{
+        app::{App, Popup},
+        model::Tab,
+    };
+    let (_dir, c) = history_fake("slow_mutation")?;
+    let started = c.executable.with_extension("started");
+    let cancelled = c.cancelled.clone();
+    let mut app = App::new(Config::default(), c);
+    app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))?;
+    app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?;
+    drive_app(&mut app, |_| started.exists())?;
+    assert!(app.mutating);
+    app.switch_tab(Tab::Log);
+    assert!(!cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    drive_app(&mut app, |app| !app.mutating)?;
+    assert!(
+        matches!(app.popup,Some(Popup::Message{ref title,ref text}) if title=="Command result" && text.contains("Mutation completed"))
+    );
     Ok(())
 }

@@ -1,5 +1,5 @@
 use crate::{config::Config, model::*, p4::Connection};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
     sync::{
@@ -53,7 +53,7 @@ pub enum Popup {
 }
 
 enum Request {
-    History(Tab, Option<HistoryCursor>, u64),
+    History(Tab, Option<HistoryCursor>, usize, u64),
     Load(Tab, usize),
     ChangeFiles(String, Tab),
     Detail(String, Detail),
@@ -90,10 +90,26 @@ impl Worker {
         let (results, receive) = mpsc::channel();
         let cancel = connection.cancelled.clone();
         let handle = thread::spawn(move || {
+            let mut history_context: Option<(u64, crate::p4::HistoryContext)> = None;
             while let Ok(job) = jobs.recv() {
                 let result = match job {
-                    Request::History(tab, cursor, epoch) => {
-                        Response::History(tab, cursor, epoch, connection.load_history(tab, cursor))
+                    Request::History(tab, cursor, size, epoch) => {
+                        let result = (|| {
+                            // Reuse connection metadata within a browsing session.
+                            // Explicit overrides must recheck current admin limits.
+                            if connection.history_max_scan_rows != 0
+                                || history_context
+                                    .as_ref()
+                                    .is_none_or(|(generation, _)| *generation != epoch)
+                            {
+                                history_context = Some((epoch, connection.history_context()?));
+                            }
+                            let (_, context) = history_context
+                                .as_ref()
+                                .context("Missing history connection")?;
+                            connection.history_page(tab, cursor, size, context)
+                        })();
+                        Response::History(tab, cursor, epoch, result)
                     }
                     Request::Load(tab, limit) => Response::Load(tab, connection.load(tab, limit)),
                     Request::ChangeFiles(id, tab) => {
@@ -156,6 +172,9 @@ pub struct App {
     pub drill: Option<String>,
     parent: Option<(View, usize)>,
     history_more_requested: bool,
+    history_scroll_requested: bool,
+    history_paging_blocked: bool,
+    history_rows: usize,
     history_epoch: u64,
     pub last_refresh: Instant,
     worker: Option<Worker>,
@@ -196,6 +215,9 @@ impl App {
             drill: None,
             parent: None,
             history_more_requested: false,
+            history_scroll_requested: false,
+            history_paging_blocked: false,
+            history_rows: 20,
             history_epoch: 0,
             last_refresh: Instant::now(),
             worker: None,
@@ -245,6 +267,7 @@ impl App {
     }
     fn send(&mut self, req: Request) -> Result<()> {
         if let Some(worker) = &self.worker {
+            worker.cancel.store(false, Ordering::Relaxed);
             worker.send.send(req)?;
             self.busy = true;
         }
@@ -261,8 +284,11 @@ impl App {
                         match result {
                             Ok(view) => self.apply_history_page(view, cursor.is_some()),
                             Err(error) => {
+                                self.history_paging_blocked = true;
+                                self.history_more_requested = false;
+                                self.history_scroll_requested = false;
                                 self.status = format!("{error:#}");
-                                self.message("History query failed",format!("{error:#}\n\nNo automatic retry. Refresh manually or narrow the history window in config."));
+                                self.message("History query failed",format!("{error:#}\n\nAutomatic paging is paused. Narrow the launch directory if the server limit was reached. Press r to refresh or + to retry an older page."));
                             }
                         }
                         self.last_refresh = Instant::now();
@@ -367,14 +393,33 @@ impl App {
             } else if self.tab.is_history() {
                 self.history_epoch = self.history_epoch.wrapping_add(1);
                 self.history_more_requested = false;
-                self.send(Request::History(self.tab, None, self.history_epoch))?;
+                self.history_scroll_requested = false;
+                self.history_paging_blocked = false;
+                self.send(Request::History(
+                    self.tab,
+                    None,
+                    self.history_batch_size(),
+                    self.history_epoch,
+                ))?;
             } else {
                 self.send(Request::Load(self.tab, self.limit))?;
             }
-        } else if !self.busy && self.history_more_requested {
+        } else if !self.busy && (self.history_more_requested || self.history_page_needed()) {
             self.history_more_requested = false;
+            self.history_scroll_requested = false;
             if let Some(cursor) = self.view.history.as_ref().and_then(|p| p.next) {
-                self.send(Request::History(self.tab, Some(cursor), self.history_epoch))?;
+                let missing = self.history_rows.saturating_sub(self.view.items.len());
+                let size = if missing > 0 {
+                    missing.min(self.history_batch_size())
+                } else {
+                    self.history_batch_size()
+                };
+                self.send(Request::History(
+                    self.tab,
+                    Some(cursor),
+                    size,
+                    self.history_epoch,
+                ))?;
             }
         } else if !self.busy
             && self.detail_needed
@@ -392,6 +437,8 @@ impl App {
         Ok(())
     }
     fn apply_history_page(&mut self, mut page: View, append: bool) {
+        self.history_paging_blocked = false;
+        self.history_scroll_requested = false;
         let was_empty = self.view.items.is_empty();
         let key = self.current().map(|item| item.key().to_string());
         if append {
@@ -436,9 +483,11 @@ impl App {
         } else {
             format!(" · {} warnings (?)", self.view.warnings.len())
         };
-        self.status = if let Some(page) = &self.view.history {
+        self.status = if let Some(page) = &self.view.history
+            && page.last_change > 0
+        {
             format!(
-                "{} changes{warnings} · window {}..{} · scan budget {} · {}",
+                "{} changes{warnings} · loaded {}..{} · scan limit {} · {}",
                 self.view.items.len(),
                 page.first_change,
                 page.last_change,
@@ -446,7 +495,7 @@ impl App {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "server policy".into()),
                 if page.next.is_some() {
-                    "+ older"
+                    "scroll for older"
                 } else {
                     "end of history"
                 }
@@ -462,9 +511,17 @@ impl App {
         }
     }
     pub fn switch_tab(&mut self, tab: Tab) {
+        if self.busy
+            && !self.mutating
+            && let Some(worker) = &self.worker
+        {
+            worker.cancel.store(true, Ordering::Relaxed);
+        }
         self.drill = None;
         self.parent = None;
         self.history_more_requested = false;
+        self.history_scroll_requested = false;
+        self.history_paging_blocked = false;
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.tab = tab;
         self.view.items.clear();
@@ -543,8 +600,8 @@ impl App {
             KeyCode::Right => self.detail_scroll.1 = self.detail_scroll.1.saturating_add(4),
             KeyCode::Down => self.navigate(1),
             KeyCode::Up => self.navigate(-1),
-            KeyCode::PageDown => self.navigate(15),
-            KeyCode::PageUp => self.navigate(-15),
+            KeyCode::PageDown => self.navigate(self.navigation_page_size()),
+            KeyCode::PageUp => self.navigate(-self.navigation_page_size()),
             KeyCode::Home => {
                 if self.focus_detail {
                     self.detail_scroll = (0, 0);
@@ -564,6 +621,7 @@ impl App {
                 } else {
                     self.selected = self.visible().len().saturating_sub(1);
                     self.selection_updated();
+                    self.history_scroll_requested = self.near_history_end();
                 }
             }
             KeyCode::Enter => {
@@ -594,6 +652,7 @@ impl App {
                     self.status =
                         "Wait for the current request before fetching another history page.".into();
                 } else if self.view.history.as_ref().and_then(|p| p.next).is_some() {
+                    self.history_paging_blocked = false;
                     self.history_more_requested = true;
                 } else {
                     self.status = "End of history; r checks for new changes.".into();
@@ -625,6 +684,61 @@ impl App {
                 .saturating_add_signed(amount as isize)
                 .min(max);
             self.selection_updated();
+            if amount > 0 {
+                self.history_scroll_requested = self.near_history_end();
+            }
+        }
+    }
+
+    pub fn set_history_rows(&mut self, rows: usize) {
+        self.history_rows = rows.max(1);
+    }
+    fn history_batch_size(&self) -> usize {
+        self.history_rows
+            .min(self.config.history_page_size)
+            .clamp(1, 200)
+    }
+    fn navigation_page_size(&self) -> i32 {
+        if self.tab.is_history() && self.drill.is_none() && !self.focus_detail {
+            self.history_rows.min(i32::MAX as usize) as i32
+        } else {
+            15
+        }
+    }
+    fn near_history_end(&self) -> bool {
+        self.tab.is_history()
+            && self.drill.is_none()
+            && !self.focus_detail
+            && !self.searching
+            && self.filter.is_empty()
+            && !self.view.items.is_empty()
+            && self
+                .selected
+                .saturating_add((self.history_rows / 4).clamp(1, 5))
+                >= self.view.items.len().saturating_sub(1)
+    }
+    fn history_page_needed(&self) -> bool {
+        self.tab.is_history()
+            && self.drill.is_none()
+            && !self.history_paging_blocked
+            && self.popup.is_none()
+            && !self.searching
+            && self.filter.is_empty()
+            && self
+                .view
+                .history
+                .as_ref()
+                .is_some_and(|page| page.next.is_some())
+            && (self.view.items.len() < self.history_rows
+                || (self.history_scroll_requested && self.near_history_end()))
+    }
+    pub fn scroll(&mut self, amount: i32, list: bool) {
+        if self.popup.is_some() {
+            self.popup_scroll =
+                (self.popup_scroll as i32 + amount).clamp(0, u16::MAX as i32) as u16;
+        } else if !self.searching {
+            self.focus_detail = !list;
+            self.navigate(amount);
         }
     }
     fn char_key(&mut self, c: char) -> Result<()> {
@@ -953,26 +1067,14 @@ mod tests {
     fn history_load_more_appends_and_drilldown_retains_the_cursor() {
         let mut app = App::for_view(
             Config::default(),
-            history_view(
-                "100",
-                Some(HistoryCursor {
-                    before: 99,
-                    window: 10,
-                }),
-            ),
+            history_view("100", Some(HistoryCursor::new(99))),
         );
         app.tab = Tab::Log;
         app.key(key('+')).unwrap();
         assert!(app.history_more_requested);
         assert_eq!(app.limit, 200);
         app.history_more_requested = false;
-        let mut page = history_view(
-            "90",
-            Some(HistoryCursor {
-                before: 89,
-                window: 10,
-            }),
-        );
+        let mut page = history_view("90", Some(HistoryCursor::new(89)));
         page.items.push(app.view.items[0].clone());
         app.apply_history_page(page, true);
         assert_eq!(app.view.items.len(), 2);
@@ -998,13 +1100,7 @@ mod tests {
     fn history_does_not_poll_automatically_or_queue_more_while_busy() {
         let mut app = App::for_view(
             Config::default(),
-            history_view(
-                "100",
-                Some(HistoryCursor {
-                    before: 99,
-                    window: 10,
-                }),
-            ),
+            history_view("100", Some(HistoryCursor::new(99))),
         );
         app.tab = Tab::Log;
         app.detail_needed = false;

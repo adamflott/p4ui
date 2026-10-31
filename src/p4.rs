@@ -26,12 +26,20 @@ pub struct Connection {
     pub timeout: Duration,
     pub max_output: u64,
     pub history_page_size: usize,
-    pub history_change_window: u64,
     pub history_max_scan_rows: u64,
     /// Used by isolated integration fixtures; normal operation inherits P4 settings.
     pub environment: Vec<(String, String)>,
     pub cancelled: Arc<AtomicBool>,
 }
+
+pub(crate) struct HistoryContext {
+    info: Info,
+    scan_limit: Option<u64>,
+    group_scan_limit: Option<u64>,
+    max_results: Option<u64>,
+    warnings: Vec<String>,
+}
+
 impl Connection {
     pub fn new(directory: PathBuf, config: &Config) -> Self {
         Self {
@@ -47,7 +55,6 @@ impl Connection {
             timeout: Duration::from_secs(config.command_timeout_seconds),
             max_output: config.max_output_mb as u64 * 1024 * 1024,
             history_page_size: config.history_page_size,
-            history_change_window: config.history_change_window,
             history_max_scan_rows: config.history_max_scan_rows,
             environment: Vec::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -218,7 +225,10 @@ impl Connection {
                     });
                 }
             }
-            Tab::Log | Tab::Shelves => return self.history_with_info(view.info, tab, None),
+            Tab::Log | Tab::Shelves => {
+                let context = self.history_context_with_info(view.info);
+                return self.history_page(tab, None, limit, &context);
+            }
             Tab::Changes => {
                 let records = self.listing_records(
                     &[
@@ -300,26 +310,32 @@ impl Connection {
         Ok(view)
     }
     pub fn load_history(&self, tab: Tab, cursor: Option<HistoryCursor>) -> Result<View> {
-        ensure!(
-            tab.is_history(),
-            "History paging is only available in Log and Shelves"
-        );
-        self.history_with_info(self.info()?, tab, cursor)
+        self.history_page(
+            tab,
+            cursor,
+            self.history_page_size,
+            &self.history_context()?,
+        )
     }
-    fn history_with_info(
-        &self,
-        info: Info,
-        tab: Tab,
-        cursor: Option<HistoryCursor>,
-    ) -> Result<View> {
-        let mut view = View {
+    pub(crate) fn history_context(&self) -> Result<HistoryContext> {
+        Ok(self.history_context_with_info(self.info()?))
+    }
+    fn history_context_with_info(&self, info: Info) -> HistoryContext {
+        let mut context = HistoryContext {
             info,
-            ..Default::default()
+            scan_limit: None,
+            group_scan_limit: None,
+            max_results: None,
+            warnings: Vec::new(),
         };
-        // Group metadata is cheap compared with revision history. Never increase
-        // a reported admin limit, including on servers permitting overrides.
-        let groups = self.records(&["groups", "-i", "-v", "-m", "1000", &view.info.user]);
-        let (scan_limit, group_limit, page_size, head_limit) = match groups {
+        // By default, inherit the server's limits exactly as the p4 CLI does.
+        // Reading group metadata is only necessary for an optional stricter cap:
+        // per-command overrides can otherwise increase an administrator's limit.
+        if self.history_max_scan_rows == 0 {
+            return context;
+        }
+        let groups = self.records(&["groups", "-i", "-v", "-m", "1000", &context.info.user]);
+        match groups {
             Ok(groups)
                 if groups.len() < 1000
                     && groups.iter().all(|r| {
@@ -334,145 +350,157 @@ impl Connection {
                     }) =>
             {
                 let scan = group_limit(&groups, "maxScanRows");
-                let results = group_limit(&groups, "maxResults");
-                let page = results
-                    .map(|r| self.history_page_size.min(r as usize))
-                    .unwrap_or(self.history_page_size)
-                    .max(1);
-                (
-                    Some(
-                        scan.map(|r| r.min(self.history_max_scan_rows))
-                            .unwrap_or(self.history_max_scan_rows),
-                    ),
-                    scan,
-                    page,
-                    results.unwrap_or(50001).clamp(1, 50001) as usize,
-                )
+                context.scan_limit = Some(
+                    scan.map(|n| n.min(self.history_max_scan_rows))
+                        .unwrap_or(self.history_max_scan_rows),
+                );
+                context.group_scan_limit = scan;
+                context.max_results = group_limit(&groups, "maxResults");
             }
-            _ => {
-                view.warnings.push("Could not determine complete group limits; leaving server limits unchanged and using a bounded changelist window.".into());
-                (None, None, self.history_page_size, 50001)
-            }
-        };
-        let prefix = scan_limit.map(|limit| format!("-zmaxScanRows={limit}"));
-        let read = |args: &[&str]| -> Result<Vec<Value>> {
-            let mut bounded = Vec::new();
-            if let Some(prefix) = &prefix {
-                bounded.push(prefix.as_str());
-            }
-            bounded.extend_from_slice(args);
-            self.records(&bounded)
-        };
-        let mut upper = cursor.map(|cursor| cursor.before);
-        if tab == Tab::Log {
-            // A global change counter can be millions of IDs ahead of a quiet
-            // branch. Seek using one revision per scoped file, rather than
-            // walking empty windows or scanning every revision of every file.
-            // At an older cursor, fstat's headChange describes that snapshot.
-            let snapshot = upper
-                .map(|before| format!("...@{before}"))
-                .unwrap_or_else(|| "...".into());
-            let maximum = head_limit.to_string();
-            match read(&["fstat", "-Os", "-T", "headChange", "-m", &maximum, &snapshot]) {
-                Ok(records) if records.len() < head_limit => {
-                    let mut latest = 0;
-                    for record in records {
-                        if record.get("headChange").is_some() {
-                            let change = field(&record, "headChange")
-                                .parse::<u64>()
-                                .context("Invalid head changelist in history lookup")?;
-                            ensure!(
-                                upper.is_none_or(|before| change <= before),
-                                "History lookup returned a change newer than the requested snapshot"
-                            );
-                            latest = latest.max(change);
-                        }
-                    }
-                    upper = Some(latest);
-                }
-                Ok(_) => view.warnings.push("History position lookup reached its file limit; falling back to bounded changelist windows. Empty windows may require + to continue.".into()),
-                Err(error) if resource_limited(&error) => view.warnings.push(format!("History position lookup reached a server resource limit; falling back to a bounded changelist window. {error:#}")),
-                Err(error) => return Err(error),
-            }
+            _ => context.warnings.push(
+                "Could not determine complete group limits; leaving server limits unchanged."
+                    .into(),
+            ),
         }
-        let upper = if let Some(upper) = upper {
-            upper
-        } else {
-            // The global counter is an O(1) high-water mark and also includes
-            // pending shelves newer than the latest submitted changelist.
-            read(&["counter", "change"])?
-                .iter()
-                .filter_map(|r| field(r, "value").parse::<u64>().ok())
-                .max()
-                .unwrap_or(0)
+        context
+    }
+    pub(crate) fn history_page(
+        &self,
+        tab: Tab,
+        cursor: Option<HistoryCursor>,
+        requested: usize,
+        context: &HistoryContext,
+    ) -> Result<View> {
+        ensure!(
+            tab.is_history(),
+            "History paging is only available in Log and Shelves"
+        );
+        let mut view = View {
+            info: context.info.clone(),
+            warnings: context.warnings.clone(),
+            ..Default::default()
         };
-        if upper == 0 {
-            return Ok(view);
-        }
-        let window = cursor
-            .map(|c| c.window)
-            .unwrap_or(self.history_change_window)
-            .clamp(1, self.history_change_window);
-        let lower = upper.saturating_sub(window - 1).max(1);
-        let scope = format!("...@{lower},@{upper}");
-        let page = page_size.clamp(1, 200).to_string();
-        let result = read(&[
-            "changes",
-            "-L",
-            "-m",
-            &page,
-            "-s",
-            if tab == Tab::Log {
-                "submitted"
+        let page_size = requested
+            .clamp(1, self.history_page_size.clamp(1, 200))
+            .min(context.max_results.unwrap_or(200).clamp(1, 200) as usize);
+        let scope = cursor
+            .filter(|_| tab == Tab::Log)
+            .map(|cursor| format!("...@{}", cursor.before))
+            .unwrap_or_else(|| "...".into());
+        let prefix = context
+            .scan_limit
+            .map(|limit| format!("-zmaxScanRows={limit}"));
+        // -m counts actual changes, regardless of gaps in the server counter.
+        // Submitted history continues immediately before the previous page.
+        // P4 ignores revision bounds on file-scoped shelf listings. Shelves
+        // therefore refetch a bounded prefix and retain an ID frontier as well
+        // as an offset, so new/deleted shelves cannot duplicate or skip rows.
+        let mut maximum = page_size
+            .saturating_add(if tab == Tab::Shelves {
+                cursor.and_then(|cursor| cursor.shelf_offset).unwrap_or(0)
             } else {
-                "shelved"
-            },
-            &scope,
-        ]);
-        let next = match result {
-            Ok(records) => {
-                let mut changes: Vec<_> = records
-                    .iter()
-                    .filter(|r| r.get("change").is_some())
-                    .collect();
-                changes.sort_by_key(|r| {
-                    std::cmp::Reverse(field(r, "change").parse::<u64>().unwrap_or(0))
-                });
-                let before = if changes.len() >= page_size {
-                    changes
-                        .last()
-                        .and_then(|r| field(r, "change").parse::<u64>().ok())
-                        .unwrap_or(lower)
-                        .saturating_sub(1)
-                } else {
-                    lower.saturating_sub(1)
-                };
-                view.items.extend(changes.into_iter().map(change_item));
-                (before > 0).then_some(HistoryCursor { before, window })
+                0
+            })
+            .min(10000);
+        let records = loop {
+            let count = maximum.to_string();
+            let mut args = Vec::new();
+            if let Some(prefix) = &prefix {
+                args.push(prefix.as_str());
             }
-            Err(error) if resource_limited(&error) => {
-                if window > 1 {
-                    view.warnings.push(format!("History scan stopped at a server resource limit. No automatic retry; + retries this range with a smaller window. {error:#}"));
-                    Some(HistoryCursor {
-                        before: upper,
-                        window: (window / 2).max(1),
-                    })
+            args.extend([
+                "changes",
+                "-L",
+                "-m",
+                &count,
+                "-s",
+                if tab == Tab::Log {
+                    "submitted"
                 } else {
-                    view.warnings.push(format!("Change {upper} exceeds the history query budget and was skipped; + continues before it. Inspect this change with the p4 CLI if needed. {error:#}"));
-                    (upper > 1).then_some(HistoryCursor {
-                        before: upper - 1,
-                        window: self.history_change_window,
-                    })
-                }
+                    "shelved"
+                },
+                &scope,
+            ]);
+            let records = self.records(&args)?;
+            let mut matching = 0;
+            for record in records
+                .iter()
+                .filter(|record| record.get("change").is_some())
+            {
+                let id = field(record, "change")
+                    .parse::<u64>()
+                    .context("Invalid history changelist")?;
+                ensure!(id > 0, "Invalid history changelist");
+                matching += usize::from(cursor.is_none_or(|cursor| id <= cursor.before));
             }
-            Err(error) => return Err(error),
+            if tab == Tab::Log
+                || matching >= page_size
+                || records.len() < maximum
+                || maximum == 10000
+            {
+                break records;
+            }
+            // Shelf insertions can shift the saved offset. Grow only enough to
+            // complete this requested page, with the same 10,000-row cache cap.
+            maximum = maximum
+                .saturating_add(page_size.max(maximum / 2))
+                .min(10000);
         };
+        let mut changes: Vec<_> = records
+            .iter()
+            .filter(|r| r.get("change").is_some())
+            .collect();
+        changes.sort_by_key(|r| std::cmp::Reverse(field(r, "change").parse::<u64>().unwrap_or(0)));
+        let mut shelf_offset = None;
+        if tab == Tab::Shelves {
+            changes = changes
+                .into_iter()
+                .enumerate()
+                .filter(|(_, record)| {
+                    cursor.is_none_or(|cursor| {
+                        field(record, "change")
+                            .parse::<u64>()
+                            .is_ok_and(|id| id <= cursor.before)
+                    })
+                })
+                .take(page_size)
+                .map(|(index, record)| {
+                    shelf_offset = Some(index + 1);
+                    record
+                })
+                .collect();
+        }
+        let mut oldest = 0;
+        let mut newest = 0;
+        for change in &changes {
+            let id = field(change, "change")
+                .parse::<u64>()
+                .context("Invalid history changelist")?;
+            ensure!(
+                id > 0 && cursor.is_none_or(|cursor| id <= cursor.before),
+                "Perforce returned a change outside the requested history page"
+            );
+            newest = newest.max(id);
+            oldest = if oldest == 0 { id } else { oldest.min(id) };
+        }
+        let shelf_capped = tab == Tab::Shelves
+            && records.len() >= 10000
+            && (changes.len() < page_size || shelf_offset == Some(10000));
+        if shelf_capped {
+            view.warnings.push("Shelf browsing reached its 10,000-row prefix limit; refresh or narrow the launch directory.".into());
+        }
+        let next =
+            (changes.len() >= page_size && oldest > 1 && !shelf_capped).then(|| HistoryCursor {
+                before: oldest - 1,
+                shelf_offset,
+            });
+        view.items.extend(changes.into_iter().map(change_item));
         view.history = Some(HistoryPage {
-            first_change: lower,
-            last_change: upper,
+            first_change: oldest,
+            last_change: newest,
             next,
-            requested_scan_limit: scan_limit,
-            group_scan_limit: group_limit,
+            requested_scan_limit: context.scan_limit,
+            group_scan_limit: context.group_scan_limit,
         });
         view.limit_reached = next.is_some();
         Ok(view)
@@ -892,11 +920,6 @@ fn group_limit(groups: &[Value], key: &str) -> Option<u64> {
         .filter_map(|r| field(r, key).parse::<u64>().ok())
         .filter(|n| *n > 0)
         .max()
-}
-
-fn resource_limited(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("maxscanrows") || message.contains("maxresults")
 }
 
 pub fn field(r: &Value, key: &str) -> String {

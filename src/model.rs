@@ -133,12 +133,21 @@ impl Item {
     }
 }
 
-/// The next inclusive upper changelist bound, with a window that can shrink
-/// after a server resource limit. No automatic scan of earlier windows occurs.
+/// The next inclusive upper changelist bound, immediately before the oldest
+/// returned change. Changelist-number gaps do not affect the page size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryCursor {
     pub before: u64,
-    pub window: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shelf_offset: Option<usize>,
+}
+impl HistoryCursor {
+    pub fn new(before: u64) -> Self {
+        Self {
+            before,
+            shelf_offset: None,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryPage {

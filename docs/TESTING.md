@@ -17,9 +17,11 @@
 - Default / dot-suffixed launch directories without spurious illegal-filename warnings; lexical cleanup preserves symlink spelling.
 - Invalid workspaces, output limits and permission failures.
 - Cursor paging through sparse scoped history without duplicate/missing changes, seeking across large server-counter gaps and gaps between scoped changes.
-- Deleted-file history, snapshot lookup at older cursors, and safe fallback when a position lookup is truncated or reaches a server limit.
-- Reported group-limit clamping, bounded ranges, non-retrying resource failures and retained fatal permission errors.
-- Appending pages while preserving selection and drilldown cursors; history does not automatically poll or queue concurrent pages.
+- Deleted-file history and result-count paging independent of changelist-number gaps.
+- Scoped shelf pagination, including new/deleted shelves while browsing.
+- Optional scan-budget clamping, server-limit inheritance, upper-bound cursors, non-retrying resource failures and retained fatal permission errors.
+- Viewport-sized initial loads, keyboard/wheel paging, resize fills, selection/drilldown preservation, metadata reuse, idle stability and paused paging after failures.
+- Cancelling a slow Status read on a tab switch without cancelling an active mutation.
 - CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.
 - Concurrent edits from two workspaces, failed submits, safe resolve preserving conflicts, explicit resolution and successful resubmit.
 - Dirty-workspace switch rejection, stream creation/deletion, branch population, parent merge and copy promotion under normal stream flow rules.
@@ -37,3 +39,5 @@ The CLI runs without a shell. Only the explicit editor command is parsed into an
 ## Manual release checks
 
 Use a disposable workspace to exercise server authentication, network timeout/reconnect, large/binary file handling, resize, terminal suspend behavior, configured editor success/failure, each theme and remapped key. Verify client root spelling, ignore files, line endings, permissions and stream flow rules on the target operating system. Test backups/recovery independently of this UI.
+
+`cargo build --locked && python3 tests/history_ui.py` drives the real executable through a PTY with a read-only fake P4 CLI. It verifies the actual terminal row count, resize fills, PageDown and SGR mouse-wheel decoding, exact continuation cursors, idle stability and terminal restoration. No real P4 server is contacted.

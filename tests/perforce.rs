@@ -838,7 +838,7 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
             f.connection
                 .records(&["counter", "-f", "change", "20000"])?;
         }
-        let scoped = index <= 2;
+        let scoped = index % 2 == 0;
         let name = if scoped { "sub/file.txt" } else { "other.txt" };
         let file = FileEntry {
             depot: format!("//depot/{name}"),
@@ -859,15 +859,20 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
     f.connection.directory = f.path("sub");
     f.connection
         .records(&["counter", "-f", "change", "70000000"])?;
-    f.connection.history_page_size = 2;
-    f.connection.history_change_window = 4;
+    f.connection.history_page_size = 4;
     let mut cursor = None;
     let mut ids = Vec::new();
     let mut pages = 0;
     loop {
         let view = f.connection.load_history(Tab::Log, cursor)?;
         ensure!(view.warnings.is_empty(), "{:?}", view.warnings);
-        ensure!(view.items.len() <= 2);
+        ensure!(view.items.len() <= 4);
+        if pages == 0 {
+            ensure!(
+                view.items.len() == 4,
+                "Initial page must contain actual changes, regardless of ID gaps"
+            );
+        }
         ensure!(
             !view.items.is_empty(),
             "Log must seek past unrelated server activity and gaps between scoped changes"
@@ -879,7 +884,7 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         );
         let page = view.history.context("Missing cursor metadata")?;
-        ensure!(page.last_change - page.first_change < 4);
+        ensure!(page.last_change >= page.first_change);
         if let Some(next) = page.next {
             if let Some(previous) = cursor {
                 ensure!(next.before < previous.before);
@@ -925,7 +930,7 @@ fn history_includes_deleted_file_heads_and_stops_at_scope_origin() -> Result<()>
         .and_then(|page| page.next)
         .context("Missing origin cursor")?;
     let end = f.connection.load_history(Tab::Log, Some(cursor))?;
-    ensure!(end.items.is_empty() && end.history.is_none());
+    ensure!(end.items.is_empty() && end.history.is_some_and(|page| page.next.is_none()));
     ensure!(end.warnings.is_empty(), "{:?}", end.warnings);
     Ok(())
 }
@@ -941,6 +946,7 @@ fn history_respects_reported_group_limits() -> Result<()> {
         matches!(pending.items.iter().find(|item|item.key()==id),Some(Item::Change {description: saved,..}) if saved.trim()==description.trim()),
         "Editable descriptions must not be truncated like history summaries"
     );
+    f.connection.history_max_scan_rows = 50000;
     f.connection.execute(
         &["group", "-i"],
         Some("Group: history-limit\nMaxScanRows: 1000\nMaxResults: 5\nUsers:\n\ttester\n"),
@@ -952,5 +958,52 @@ fn history_respects_reported_group_limits() -> Result<()> {
     ensure!(page.group_scan_limit == Some(1000));
     ensure!(page.requested_scan_limit == Some(1000));
     ensure!(view.items.len() == 1);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn shelf_pages_use_change_cursors_without_duplicates_or_missing_shelves() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.seed()?;
+    let Item::File(file) = f.connection.load(Tab::Files, 200)?.items.remove(0) else {
+        anyhow::bail!("Expected depot file");
+    };
+    let mut expected = Vec::new();
+    for index in 0..5 {
+        let counter = (10000 + index * 3000).to_string();
+        f.connection
+            .records(&["counter", "-f", "change", &counter])?;
+        let id = f.change(&format!("Shelf {index}"))?;
+        f.connection.act(Action::Edit(file.clone(), id.clone()))?;
+        f.write("hello.txt", &format!("shelf {index}\n"))?;
+        f.connection.act(Action::Shelve(id.clone()))?;
+        f.connection
+            .act(Action::Revert(f.file("hello.txt")?, false))?;
+        expected.push(id);
+    }
+    expected.reverse();
+    f.connection.history_page_size = 2;
+    let mut actual = Vec::new();
+    let mut cursor = None;
+    for index in 0..3 {
+        let page = f.connection.load_history(Tab::Shelves, cursor)?;
+        ensure!(page.warnings.is_empty(), "{:?}", page.warnings);
+        ensure!(page.items.len() == if index < 2 { 2 } else { 1 });
+        actual.extend(page.items.iter().map(|item| item.key().to_owned()));
+        cursor = page.history.and_then(|page| page.next);
+        if index == 0 {
+            let id = f.change("New shelf while browsing")?;
+            f.connection.act(Action::Edit(file.clone(), id.clone()))?;
+            f.write("hello.txt", "new shelf\n")?;
+            f.connection.act(Action::Shelve(id))?;
+            f.connection
+                .act(Action::Revert(f.file("hello.txt")?, false))?;
+        } else if index == 1 {
+            f.connection.act(Action::DeleteShelf(expected[0].clone()))?;
+        }
+    }
+    ensure!(cursor.is_none());
+    ensure!(actual == expected, "Expected {expected:?}, got {actual:?}");
     Ok(())
 }

@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -51,10 +54,10 @@ struct Args {
     /// Read workspace status as JSON and exit without a terminal
     #[arg(long)]
     status: bool,
-    /// Read one bounded Log window as JSON without loading workspace status
+    /// Read one result-count-limited Log page as JSON without loading workspace status
     #[arg(long, conflicts_with_all = ["status", "check"])]
     log: bool,
-    /// Inclusive upper changelist bound for --log (otherwise the latest counter)
+    /// Inclusive upper changelist bound for --log (otherwise the latest scoped changes)
     #[arg(long, requires = "log", value_parser = clap::value_parser!(u64).range(1..))]
     before_change: Option<u64>,
     /// Check connection/workspace and print diagnostics without a terminal
@@ -66,7 +69,12 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let guard = Self;
-        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         Ok(guard)
     }
     fn restore() {
@@ -74,6 +82,7 @@ impl TerminalGuard {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -123,10 +132,7 @@ fn run() -> Result<()> {
     connection.client = args.client;
     connection.charset = args.charset;
     if args.log {
-        let cursor = args.before_change.map(|before| p4ui::model::HistoryCursor {
-            before,
-            window: config.history_change_window,
-        });
+        let cursor = args.before_change.map(p4ui::model::HistoryCursor::new);
         println!(
             "{}",
             serde_json::to_string_pretty(&connection.load_history(Tab::Log, cursor)?)?
@@ -173,6 +179,8 @@ fn run() -> Result<()> {
         app.switch_tab(args.tab);
     }
     while !app.quit {
+        let size = terminal.size()?;
+        app.set_history_rows(ui::list_rows(size.height));
         app.tick()?;
         if shutdown.load(Ordering::Relaxed) && !app.mutating {
             break;
@@ -196,6 +204,21 @@ fn run() -> Result<()> {
                     app.key(key)?
                 }
                 Event::Paste(text) => app.paste(&text),
+                Event::Mouse(mouse)
+                    if mouse.row >= 3 && mouse.row < size.height.saturating_sub(3) =>
+                {
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => app.scroll(
+                            3,
+                            u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
+                        ),
+                        MouseEventKind::ScrollUp => app.scroll(
+                            -3,
+                            u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
+                        ),
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }

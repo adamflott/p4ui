@@ -62,7 +62,7 @@ The result of a failed submit can be a newly numbered pending changelist. Refres
 
 ## Keys
 
-`?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, `+` fetches the next older window in Log/Shelves (and increases the result limit in other tabs), `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
+`?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, scrolling near the bottom loads an older page in Log/Shelves (`+` also loads a page; it increases the result limit in other tabs), `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
 
 | Tab | Commands |
 | --- | --- |
@@ -89,9 +89,8 @@ refresh_seconds = 10          # 0 disables automatic refresh; Log/Shelves refres
 command_timeout_seconds = 120 # 1..3600, including submits and large syncs
 max_output_mb = 16            # 1..256 per command/preview
 page_size = 200               # non-history tabs: 10..10000; + raises it
-history_page_size = 50        # 1..200 changelists per history request
-history_change_window = 1000  # 1..10000 changelist IDs per bounded history window
-history_max_scan_rows = 50000 # 1..1000000; request no more than reported group limit
+history_page_size = 100       # 1..200 maximum batch; interactive batches use visible rows
+history_max_scan_rows = 0     # inherit server limits; 1..1000000 requests a stricter cap
 theme = "dark"               # dark, light, mono
 
 [keys]
@@ -103,15 +102,17 @@ Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `o
 
 ## History on large depots
 
-Log and Shelves use explicit changelist ranges and a cursor; `+` fetches older data and appends it without refetching earlier pages. They never automatically poll or walk the entire history. In Log, each page first locates the latest change in the launch directory at or before the cursor, using file-head metadata. This skips unrelated server activity and gaps in a quiet branch's history. `r` starts again at the latest scoped change. Shelves start at the server's change counter. The status bar shows the last window and requested scan budget. Filters search the cached rows only; at most 10,000 changes are cached.
+Log and Shelves initially request enough actual changes to fill the visible list, up to `history_page_size` per request. Moving down near the bottom (arrow keys, PageDown, or mouse wheel) fetches the next page in the background. `+` also loads an older page. Resizing a larger terminal fills its additional rows. Pages append to the cache, preserving selection; older pages use the changelist immediately before the oldest returned change as their upper bound. Gaps in changelist numbers do not reduce the number of changes requested.
 
-Log's position lookup requests only `headChange` metadata, with the same scan budget, and reads at most 50,001 file heads (or the reported `MaxResults`, if smaller). At older cursors it reads a snapshot at that changelist. A truncated or resource-limited lookup is never treated as complete: p4ui warns and falls back to a bounded changelist window. Such fallback windows, and Shelves windows on quiet branches, can be empty; `+` continues backward.
+Log pages use `p4 changes -L -m N -s submitted ...`, with an upper revision bound for older pages. There are no file-head scans, global-counter walks, or repeated queries for already cached Log pages. Perforce ignores revision bounds on file-scoped shelf listings, so Shelves use `-s shelved`, refetch a bounded prefix (at most 10,000 rows), and filter with an ID cursor to handle shelf insertions/deletions. Connection information is reused within a browsing session. Switching tabs cancels an outstanding background read; active mutations continue to completion. Log and Shelves never poll while idle. `r` refreshes from the newest changes. Filters search the cached rows only; at most 10,000 changes are cached.
 
-`p4 changes -m N` limits returned changes, not necessarily the number of file revisions scanned. p4ui reads the user's group limits and requests the lower of `history_max_scan_rows` and the reported effective `MaxScanRows`; the page size is also capped by a reported `MaxResults`. It does not change server/group settings or request higher group limits. If group metadata is unavailable/incomplete, it leaves server limits unchanged and reports a warning. There is no cheap, reliable total row count for a workspace history query; changelist numbers and scan rows are different measures. See Perforce's [query limit documentation](https://help.perforce.com/helix-core/server-apps/p4sag/current/Content/P4SAG/performance.prevention.query_limits.html) for the server controls.
+By default, p4ui inherits the server's resource limits, just like the P4 CLI. `history_max_scan_rows = 0` does not override them. A positive value requests an optional stricter scan cap, clamped to reported group limits; if group metadata cannot be read completely, p4ui leaves the server limits unchanged and warns. Such overrides can be ignored by a server configured with `server.commandlimits=2`. `-m N` limits returned changes, not necessarily scanned database rows, so a large scope can still exceed an admin limit. See Perforce's [query limit documentation](https://help.perforce.com/helix-core/server-apps/p4sag/current/Content/P4SAG/performance.prevention.query_limits.html).
 
-Perforce can ignore per-command limit requests (`server.commandlimits=2`); bounded revision ranges still apply. A resource-limit failure of a history window never causes an automatic retry. `+` tries the same upper bound with a smaller window. If even one change exceeds the budget, it is explicitly reported as skipped and `+` can continue before it. Use a narrower launch directory or the P4 CLI to inspect an oversized change. Automatic change previews omit diffs and show at most 200 files, keeping large commits from triggering another unbounded read.
+On a failed request, automatic paging pauses and existing rows/cursors are retained. There is no automatic retry or silent skipping of changes. Narrow the launch directory if the server limit was reached; `r` refreshes or `+` explicitly retries an older page. Automatic change previews omit diffs and show at most 200 files. Enter opens per-file diffs.
 
-For read-only diagnostics, `p4ui --log` emits one window as JSON, including `history.next`, requested/group limits and warnings. `p4ui --log --before-change 12345` starts at an explicit upper changelist bound.
+If you copied an older configuration example with `history_max_scan_rows = 50000`, set it to `0` to use normal server limits. The old `history_change_window` configuration key remains accepted for compatibility and no longer affects paging.
+
+For read-only diagnostics, `p4ui --log` emits one result-count-limited page as JSON, including `history.next`, optional scan limits and warnings. `p4ui --log --before-change 12345` starts at an inclusive upper changelist bound.
 
 ## Development
 
@@ -122,6 +123,7 @@ cargo test --locked
 cargo test --locked --test perforce -- --ignored
 cargo build --locked
 python3 tests/ui_smoke.py
+python3 tests/history_ui.py
 ```
 
 Integration fixtures use isolated temporary servers via the local `rsh:` transport. They do not connect to your server or listen on a network port. Their security overrides apply **only to their temporary databases**, which are deleted after each test. Python 3 is needed for process-boundary tests and the Unix PTY smoke test. See [CONTRIBUTING.md](CONTRIBUTING.md).

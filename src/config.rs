@@ -10,6 +10,7 @@ pub struct Config {
     pub max_output_mb: usize,
     pub page_size: usize,
     pub history_page_size: usize,
+    /// Legacy configuration key, retained for compatibility. ID windows are unused.
     pub history_change_window: u64,
     pub history_max_scan_rows: u64,
     pub theme: String,
@@ -23,9 +24,9 @@ impl Default for Config {
             command_timeout_seconds: 120,
             max_output_mb: 16,
             page_size: 200,
-            history_page_size: 50,
+            history_page_size: 100,
             history_change_window: 1000,
-            history_max_scan_rows: 50000,
+            history_max_scan_rows: 0,
             theme: "dark".into(),
             keys: BTreeMap::new(),
         }
@@ -66,8 +67,8 @@ impl Config {
         if !(1..=10000).contains(&config.history_change_window) {
             bail!("history_change_window must be 1..=10000");
         }
-        if !(1..=1000000).contains(&config.history_max_scan_rows) {
-            bail!("history_max_scan_rows must be 1..=1000000");
+        if config.history_max_scan_rows > 1000000 {
+            bail!("history_max_scan_rows must be 0..=1000000 (0 uses server limits)");
         }
         if !["dark", "light", "mono"].contains(&config.theme.as_str()) {
             bail!("theme must be dark, light, or mono");
@@ -163,7 +164,7 @@ mod tests {
             "page_size = 0",
             "history_page_size = 0",
             "history_change_window = 10001",
-            "history_max_scan_rows = 0",
+            "history_max_scan_rows = 1000001",
             "theme = 'typo'",
             "unknown = 1",
             "[keys]\nquit = 'r'",

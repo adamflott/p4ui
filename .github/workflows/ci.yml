@@ -55,3 +55,4 @@ jobs:
       - run: cargo test --locked --test perforce -- --ignored
       - run: cargo build --locked
       - run: python3 tests/ui_smoke.py
+      - run: python3 tests/history_ui.py

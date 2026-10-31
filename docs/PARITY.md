@@ -10,7 +10,7 @@ The goal is a familiar daily SCM workflow with honest Perforce semantics. This t
 | Commit | Default or numbered changelist submit, multiline description, confirmation | Server submit triggers run normally |
 | Amend | Edit pending descriptions | Submitted changes are immutable revisions; history rewriting is not mapped |
 | Stash inspect/save/apply/drop | Shelf inspect/create/unshelve/delete | Shelves need numbered changelists; no force-update, automatic revert or pop shortcut |
-| Browse/search log and committed diffs | Cursor-paged changelist windows, loaded-row filtering, bounded change summaries and per-file revision diffs | No server-wide full-text search; + fetches older windows; summaries/file drilldown show at most 200 files |
+| Browse/search log and committed diffs | Viewport-sized history pages with scroll loading, loaded-row filtering, bounded change summaries and per-file revision diffs | No server-wide full-text search; scrolling/+ fetches older pages; summaries/file drilldown show at most 200 files |
 | Browse files and blame | Depot files, revision previews, annotate, file/integration history, editor | Flat filtered list, no collapsible directory tree or syntax highlighting |
 | Branches | Stream list/spec inspection, create/delete/switch, merge/copy | Existing stream depot/workspace needed; stream flow rules apply; no branch-spec UI or stream-path rename |
 | Fetch/push | Sync/submit | Centralized depot; no Git remotes or push queue |
