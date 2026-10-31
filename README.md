@@ -42,7 +42,7 @@ Run from the workspace root to operate on the whole workspace. Status, history, 
 
 ## Build and native packages
 
-See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Package workflows upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). These are upstream packages; availability in official distro repositories is tracked separately.
+See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Branch builds upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). Pushing a stable `vX.Y.Z` tag automatically publishes all packages under [Releases](https://github.com/adamflott/p4ui/releases) after the package checks pass. See [Releasing](docs/RELEASING.md) for version updates and existing-tag releases. These are upstream packages; availability in official distro repositories is tracked separately.
 
 ## Workflow
 

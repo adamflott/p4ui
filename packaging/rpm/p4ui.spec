@@ -38,7 +38,7 @@ install -Dm755 target/release/p4ui %{buildroot}%{_bindir}/p4ui
 %{_bindir}/p4ui
 %license LICENSE
 %license THIRD_PARTY_NOTICES
-%doc README.md CONTRIBUTING.md docs/BUILDING.md docs/PARITY.md docs/TESTING.md
+%doc README.md CONTRIBUTING.md docs/BUILDING.md docs/RELEASING.md docs/PARITY.md docs/TESTING.md
 
 %changelog
 * Sat Oct 31 2026 Adam Flott <adam@adamflott.com> - 0.1.0-1

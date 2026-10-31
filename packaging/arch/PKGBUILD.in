@@ -8,6 +8,7 @@ pkgdesc='A keyboard-driven terminal interface for Perforce'
 arch=('x86_64' 'aarch64')
 url='https://github.com/adamflott/p4ui'
 license=('MIT')
+options=('!debug') # The release profile already strips symbols.
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo' 'python')
 optdepends=('helix-cli: Perforce command-line client (or install p4 from Perforce)')
