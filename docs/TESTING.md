@@ -15,6 +15,7 @@
 - Move/rename, lock/unlock and sync.
 - Client selection, label/stream listing and current-directory/ignore scoping.
 - Invalid workspaces, output limits and permission failures.
+- CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.
 - Concurrent edits from two workspaces, failed submits, safe resolve preserving conflicts, explicit resolution and successful resubmit.
 - Dirty-workspace switch rejection, stream creation/deletion, branch population, parent merge and copy promotion under normal stream flow rules.
 

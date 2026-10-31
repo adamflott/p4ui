@@ -42,6 +42,7 @@ Cargo installs to `~/.cargo/bin` by default; include that directory on PATH. For
    p4 -V
    cd /path/to/your/perforce/workspace
    p4 login                    # if your server requires it
+   export P4PORT=ssl:perforce.example.com:1666  # or your server address
    p4ui --check
    p4ui
    ```
@@ -69,6 +70,16 @@ Nix users can enter a development shell with:
 nix shell nixpkgs#rustc nixpkgs#cargo nixpkgs#gcc nixpkgs#git
 cargo build --release --locked
 ```
+
+Connect by setting the server address in your shell, or pass `p4ui --port address` to override it:
+
+```sh
+export P4PORT=ssl:perforce.example.com:1666
+p4ui --client your-workspace --check
+p4ui --client your-workspace
+```
+
+The order is `--port` / `-p`, then nonempty `P4PORT`, then the normal Perforce config-file/settings fallback. Existing `--user`, `--client`, login tickets, and other configuration sources continue to work.
 
 Install the proprietary Perforce `p4` client separately from [Perforce's downloads](https://www.perforce.com/downloads/helix-command-line-client-p4) or its supported package repository for your OS/architecture. The client is not bundled with p4ui. Its package name varies across repositories. Verify `p4 -V`; merely building/installing p4ui does not create a workspace or log in.
 

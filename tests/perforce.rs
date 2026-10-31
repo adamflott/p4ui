@@ -696,3 +696,69 @@ fn shelved_add_preview_and_large_file_limits() -> Result<()> {
     ensure!(result.is_err(), "Large shelved content must be limited");
     Ok(())
 }
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn cli_p4port_environment_and_connection_precedence() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.seed()?;
+    let config = fixture._dir.path().join("p4ui.toml");
+    std::fs::write(&config, "refresh_seconds = 0\n")?;
+    let port = fixture
+        .connection
+        .port
+        .as_deref()
+        .context("Fixture server address missing")?;
+    let base = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_p4ui"));
+        command
+            .envs(fixture.connection.environment.iter().cloned())
+            .env("P4USER", "tester")
+            .env("P4CLIENT", "test")
+            .args([
+                "--directory",
+                &fixture.connection.directory.to_string_lossy(),
+            ])
+            .arg("--config")
+            .arg(&config);
+        command
+    };
+    let run = |command: &mut Command| -> Result<String> {
+        let output = command.output()?;
+        ensure!(
+            output.status.success(),
+            "p4ui failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    // No --port/-p anywhere: the exported environment is enough to connect.
+    ensure!(run(base().env("P4PORT", port).arg("--check"))?.contains("tester@test"));
+    let status: serde_json::Value =
+        serde_json::from_str(&run(base().env("P4PORT", port).arg("--status"))?)?;
+    ensure!(
+        status["info"]["client"] == "test" && status["items"].as_array().is_some_and(Vec::is_empty)
+    );
+    // Both spellings of the explicit flag take precedence over an unusable env address.
+    for flag in ["--port", "-p"] {
+        ensure!(
+            run(base()
+                .env("P4PORT", "127.0.0.1:1")
+                .args([flag, port, "--check"]))?
+            .contains("tester@test")
+        );
+    }
+    let p4config = fixture.path(".p4ui-nonexistent-config");
+    // A provided environment address is an explicit p4ui connection choice.
+    std::fs::write(&p4config, "P4PORT=127.0.0.1:1\n")?;
+    ensure!(run(base().env("P4PORT", port).arg("--check"))?.contains("tester@test"));
+    // With no port or an empty env value, retain the existing p4 config fallback.
+    std::fs::write(&p4config, format!("P4PORT={port}\n"))?;
+    ensure!(run(base().env_remove("P4PORT").arg("--check"))?.contains("tester@test"));
+    ensure!(run(base().env("P4PORT", "").arg("--check"))?.contains("tester@test"));
+    // Help advertises the variable without leaking its current server address.
+    let help = run(base()
+        .env("P4PORT", "private-server.example:1666")
+        .arg("--help"))?;
+    ensure!(help.contains("P4PORT") && !help.contains("private-server.example"));
+    Ok(())
+}

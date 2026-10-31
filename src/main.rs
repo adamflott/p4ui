@@ -27,8 +27,8 @@ struct Args {
     /// Directory to use (status/sync/reconcile are scoped to its descendants)
     #[arg(short = 'd', long, default_value = ".")]
     directory: PathBuf,
-    /// Perforce server, e.g. ssl:perforce.example.com:1666
-    #[arg(short = 'p', long)]
+    /// Perforce server; overrides P4PORT (otherwise use normal p4 configuration)
+    #[arg(short = 'p', long, env = "P4PORT", hide_env_values = true)]
     port: Option<String>,
     /// Perforce user (otherwise P4USER/P4CONFIG)
     #[arg(short = 'u', long)]
@@ -108,7 +108,8 @@ fn run() -> Result<()> {
     );
     let mut connection = Connection::new(directory, &config);
     connection.executable = args.p4;
-    connection.port = args.port;
+    // An empty P4PORT leaves resolution to the normal p4 configuration.
+    connection.port = args.port.filter(|port| !port.is_empty());
     connection.user = args.user;
     connection.client = args.client;
     connection.charset = args.charset;

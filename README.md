@@ -27,7 +27,16 @@ p4ui --status              # machine-readable workspace status, no TTY needed
 p4ui --help
 ```
 
-`P4CONFIG`, `P4PORT`, `P4USER`, `P4CLIENT`, `P4CHARSET`, trust, ignore rules, and login tickets use the normal `p4` configuration. Explicit connection flags override those settings. Authentication/SSO, trust enrollment, server administration, and workspace creation remain in the `p4` CLI. No passwords are accepted on p4ui's command line or stored in its configuration.
+Set `P4PORT` to connect without a port flag:
+
+```sh
+export P4PORT=ssl:perforce.example.com:1666
+p4ui -u alice -c alice-workspace
+# Or just for this invocation:
+P4PORT=perforce.example.com:1666 p4ui --check
+```
+
+For the server address, p4ui uses `--port` / `-p` first, then a nonempty `P4PORT`, then the normal `p4` configuration (including `P4CONFIG` / `P4ENVIRO`). The chosen flag or environment address overrides a server address in a workspace config file. Other settings such as `P4USER`, `P4CLIENT`, `P4CHARSET`, trust, ignore rules, and login tickets continue to use normal `p4` resolution. Explicit connection flags override their corresponding settings. Authentication/SSO, trust enrollment, server administration, and workspace creation remain in the `p4` CLI. No passwords are accepted on p4ui's command line or stored in its configuration.
 
 Run from the workspace root to operate on the whole workspace. Status, history, files, sync, reconcile, merge, and copy use the current directory and its descendants. **Submit and shelve operate on the entire changelist**, including files outside that directory. Enter on a pending changelist shows its complete file list.
 
