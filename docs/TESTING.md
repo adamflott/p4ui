@@ -16,7 +16,8 @@
 - Client selection, label/stream listing and current-directory/ignore scoping.
 - Default / dot-suffixed launch directories without spurious illegal-filename warnings; lexical cleanup preserves symlink spelling.
 - Invalid workspaces, output limits and permission failures.
-- Cursor paging through sparse scoped history without duplicate/missing changes, including empty windows.
+- Cursor paging through sparse scoped history without duplicate/missing changes, seeking across large server-counter gaps and gaps between scoped changes.
+- Deleted-file history, snapshot lookup at older cursors, and safe fallback when a position lookup is truncated or reaches a server limit.
 - Reported group-limit clamping, bounded ranges, non-retrying resource failures and retained fatal permission errors.
 - Appending pages while preserving selection and drilldown cursors; history does not automatically poll or queue concurrent pages.
 - CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.

@@ -832,6 +832,12 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
         .act(Action::Submit("default".into(), "Initial files".into()))?;
     let mut expected = vec![1u64];
     for index in 1..=10 {
+        if index == 2 {
+            // An active server can assign many changes to unrelated branches
+            // between two commits in this scope. This is an isolated p4d.
+            f.connection
+                .records(&["counter", "-f", "change", "20000"])?;
+        }
         let scoped = index <= 2;
         let name = if scoped { "sub/file.txt" } else { "other.txt" };
         let file = FileEntry {
@@ -851,17 +857,21 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
         }
     }
     f.connection.directory = f.path("sub");
+    f.connection
+        .records(&["counter", "-f", "change", "70000000"])?;
     f.connection.history_page_size = 2;
     f.connection.history_change_window = 4;
     let mut cursor = None;
     let mut ids = Vec::new();
-    let mut empty = false;
     let mut pages = 0;
     loop {
         let view = f.connection.load_history(Tab::Log, cursor)?;
         ensure!(view.warnings.is_empty(), "{:?}", view.warnings);
         ensure!(view.items.len() <= 2);
-        empty |= view.items.is_empty();
+        ensure!(
+            !view.items.is_empty(),
+            "Log must seek past unrelated server activity and gaps between scoped changes"
+        );
         ids.extend(
             view.items
                 .iter()
@@ -881,12 +891,42 @@ fn history_cursor_pages_sparse_scope_without_gaps_or_duplicates() -> Result<()> 
         pages += 1;
         ensure!(pages < 20, "Pagination did not terminate");
     }
-    ensure!(
-        empty,
-        "Sparse history should expose an empty bounded window"
-    );
     expected.sort_by(|a, b| b.cmp(a));
     ensure!(ids == expected, "Expected {expected:?}, got {ids:?}");
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn history_includes_deleted_file_heads_and_stops_at_scope_origin() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.connection.records(&["counter", "-f", "change", "100"])?;
+    f.seed()?;
+    let Item::File(file) = f.connection.load(Tab::Files, 200)?.items.remove(0) else {
+        anyhow::bail!("Expected file");
+    };
+    f.connection.act(Action::Delete(file))?;
+    f.connection
+        .act(Action::Submit("default".into(), "Delete last file".into()))?;
+    f.connection
+        .records(&["counter", "-f", "change", "70000000"])?;
+    f.connection.history_page_size = 1;
+    let latest = f.connection.load_history(Tab::Log, None)?;
+    ensure!(latest.warnings.is_empty(), "{:?}", latest.warnings);
+    ensure!(latest.items.len() == 1 && latest.items[0].key() == "102");
+    let cursor = latest
+        .history
+        .and_then(|page| page.next)
+        .context("Missing older cursor")?;
+    let older = f.connection.load_history(Tab::Log, Some(cursor))?;
+    ensure!(older.warnings.is_empty(), "{:?}", older.warnings);
+    ensure!(older.items.len() == 1 && older.items[0].key() == "101");
+    let cursor = older
+        .history
+        .and_then(|page| page.next)
+        .context("Missing origin cursor")?;
+    let end = f.connection.load_history(Tab::Log, Some(cursor))?;
+    ensure!(end.items.is_empty() && end.history.is_none());
+    ensure!(end.warnings.is_empty(), "{:?}", end.warnings);
     Ok(())
 }
 #[test]

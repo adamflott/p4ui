@@ -78,6 +78,14 @@ elif 'groups' in sys.argv:
   print(json.dumps({'severity':3,'generic':36,'data':'Permission denied'}));sys.exit(1)
  print(json.dumps({'group':'bounded','maxScanRows':'80','maxResults':'3'}))
 elif 'counter' in sys.argv: print(json.dumps({'value':'10000'}))
+elif 'fstat' in sys.argv:
+ assert sys.argv[sys.argv.index('-T')+1]=='headChange'
+ assert '-Os' in sys.argv and '-m' in sys.argv
+ if os.environ['MODE']=='head_limit':
+  print(json.dumps({'severity':3,'generic':35,'data':'Too many rows scanned; see p4 help maxscanrows.'}));sys.exit(1)
+ if os.environ['MODE']=='head_truncated':
+  for change in ['1','2','3']: print(json.dumps({'headChange':change}))
+ else: print(json.dumps({'headChange':'10000'}))
 elif 'changes' in sys.argv:
  assert any(arg.startswith('...@') and ',@' in arg for arg in sys.argv), 'Unbounded history query'
  if os.environ['MODE']=='groups_denied': assert not any(arg.startswith('-zmaxScanRows=') for arg in sys.argv)
@@ -153,5 +161,35 @@ fn history_permission_failures_are_fatal_and_unknown_limits_are_not_overridden()
         view.history.and_then(|page| page.requested_scan_limit),
         None
     );
+    Ok(())
+}
+#[test]
+fn history_lookup_limits_do_not_silently_skip_newer_changes() -> Result<()> {
+    use p4ui::model::Tab;
+    for mode in ["head_limit", "head_truncated"] {
+        let (_dir, c) = history_fake(mode)?;
+        let view = c.load_history(Tab::Log, None)?;
+        assert!(
+            view.warnings
+                .iter()
+                .any(|warning| warning.contains("falling back"))
+        );
+        assert_eq!(view.history.map(|page| page.last_change), Some(10000));
+        let calls = std::fs::read_to_string(c.executable.with_extension("calls"))?;
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.contains("\"fstat\""))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.contains("\"changes\""))
+                .count(),
+            1
+        );
+    }
     Ok(())
 }

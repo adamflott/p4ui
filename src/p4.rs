@@ -319,7 +319,7 @@ impl Connection {
         // Group metadata is cheap compared with revision history. Never increase
         // a reported admin limit, including on servers permitting overrides.
         let groups = self.records(&["groups", "-i", "-v", "-m", "1000", &view.info.user]);
-        let (scan_limit, group_limit, page_size) = match groups {
+        let (scan_limit, group_limit, page_size, head_limit) = match groups {
             Ok(groups)
                 if groups.len() < 1000
                     && groups.iter().all(|r| {
@@ -346,11 +346,12 @@ impl Connection {
                     ),
                     scan,
                     page,
+                    results.unwrap_or(50001).clamp(1, 50001) as usize,
                 )
             }
             _ => {
                 view.warnings.push("Could not determine complete group limits; leaving server limits unchanged and using a bounded changelist window.".into());
-                (None, None, self.history_page_size)
+                (None, None, self.history_page_size, 50001)
             }
         };
         let prefix = scan_limit.map(|limit| format!("-zmaxScanRows={limit}"));
@@ -362,8 +363,40 @@ impl Connection {
             bounded.extend_from_slice(args);
             self.records(&bounded)
         };
-        let upper = if let Some(cursor) = cursor {
-            cursor.before
+        let mut upper = cursor.map(|cursor| cursor.before);
+        if tab == Tab::Log {
+            // A global change counter can be millions of IDs ahead of a quiet
+            // branch. Seek using one revision per scoped file, rather than
+            // walking empty windows or scanning every revision of every file.
+            // At an older cursor, fstat's headChange describes that snapshot.
+            let snapshot = upper
+                .map(|before| format!("...@{before}"))
+                .unwrap_or_else(|| "...".into());
+            let maximum = head_limit.to_string();
+            match read(&["fstat", "-Os", "-T", "headChange", "-m", &maximum, &snapshot]) {
+                Ok(records) if records.len() < head_limit => {
+                    let mut latest = 0;
+                    for record in records {
+                        if record.get("headChange").is_some() {
+                            let change = field(&record, "headChange")
+                                .parse::<u64>()
+                                .context("Invalid head changelist in history lookup")?;
+                            ensure!(
+                                upper.is_none_or(|before| change <= before),
+                                "History lookup returned a change newer than the requested snapshot"
+                            );
+                            latest = latest.max(change);
+                        }
+                    }
+                    upper = Some(latest);
+                }
+                Ok(_) => view.warnings.push("History position lookup reached its file limit; falling back to bounded changelist windows. Empty windows may require + to continue.".into()),
+                Err(error) if resource_limited(&error) => view.warnings.push(format!("History position lookup reached a server resource limit; falling back to a bounded changelist window. {error:#}")),
+                Err(error) => return Err(error),
+            }
+        }
+        let upper = if let Some(upper) = upper {
+            upper
         } else {
             // The global counter is an O(1) high-water mark and also includes
             // pending shelves newer than the latest submitted changelist.
@@ -417,16 +450,7 @@ impl Connection {
                 view.items.extend(changes.into_iter().map(change_item));
                 (before > 0).then_some(HistoryCursor { before, window })
             }
-            Err(error)
-                if error
-                    .to_string()
-                    .to_ascii_lowercase()
-                    .contains("maxscanrows")
-                    || error
-                        .to_string()
-                        .to_ascii_lowercase()
-                        .contains("maxresults") =>
-            {
+            Err(error) if resource_limited(&error) => {
                 if window > 1 {
                     view.warnings.push(format!("History scan stopped at a server resource limit. No automatic retry; + retries this range with a smaller window. {error:#}"));
                     Some(HistoryCursor {
@@ -868,6 +892,11 @@ fn group_limit(groups: &[Value], key: &str) -> Option<u64> {
         .filter_map(|r| field(r, key).parse::<u64>().ok())
         .filter(|n| *n > 0)
         .max()
+}
+
+fn resource_limited(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("maxscanrows") || message.contains("maxresults")
 }
 
 pub fn field(r: &Value, key: &str) -> String {
