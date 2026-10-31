@@ -54,6 +54,8 @@ See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac 
 6. `s` in Changes shelves a numbered changelist. Shelving keeps the files open; revert separately when ready. `u` in Shelves unshelves into a chosen pending change. Existing shelf content is never force-overwritten.
 7. `f` syncs to depot HEAD after confirmation. **Resolve** lists unresolved files; `R` chooses safe automatic resolve, merge, yours, or theirs. Conflicts left by auto resolve require your merge tool and `p4 resolve`.
 
+Nonfatal workspace scan warnings appear in the status bar; press `?` to read their full messages. Usable files remain available, and warnings identify potentially incomplete results. Authentication errors and failed commands still stop the request.
+
 The result of a failed submit can be a newly numbered pending changelist. Refresh and inspect Changes before retrying. Timeouts and interrupted network operations also require inspection; server changes are not assumed to be rolled back.
 
 ## Keys

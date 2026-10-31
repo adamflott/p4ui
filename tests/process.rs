@@ -48,3 +48,23 @@ fn excessive_output_is_reported_without_loading_it_all() -> Result<()> {
     assert!(error.to_string().contains("output limit"));
     Ok(())
 }
+#[test]
+fn workspace_listing_keeps_files_and_warnings_while_mutations_fail() -> Result<()> {
+    use p4ui::model::{Action, Tab};
+    let source = r#"import json,sys
+if 'info' in sys.argv:
+    print(json.dumps({'userName':'tester','clientName':'test','clientRoot':'/workspace'}))
+elif 'fstat' in sys.argv:
+    print(json.dumps({'depotFile':'//depot/opened.txt','clientFile':'/workspace/opened.txt','action':'edit','change':'default'}))
+else:
+    print(json.dumps({'severity':2,'generic':4,'data':"/workspace/ordinary.xml - can't reconcile filename with illegal characters."}))
+    print(json.dumps({'depotFile':'//depot/new.txt','clientFile':'/workspace/new.txt','action':'add'}))"#;
+    let (_dir, mut c) = fake(source)?;
+    let view = c.load(Tab::Status, 200)?;
+    assert_eq!(view.items.len(), 2);
+    assert_eq!(view.warnings.len(), 1);
+    assert!(view.warnings[0].contains("illegal characters"));
+    assert!(c.records(&["reconcile", "-n", "-f", "..."]).is_err());
+    assert!(c.act(Action::Reconcile(None, "default".into())).is_err());
+    Ok(())
+}

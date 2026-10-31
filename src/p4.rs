@@ -33,7 +33,10 @@ impl Connection {
     pub fn new(directory: PathBuf, config: &Config) -> Self {
         Self {
             executable: "p4".into(),
-            directory,
+            // Path components remove redundant `.` without resolving symlinks.
+            // Older p4 clients otherwise include `/./` in reconcile filenames and
+            // reject ordinary names as containing illegal characters.
+            directory: directory.components().collect(),
             port: None,
             user: None,
             client: None,
@@ -149,6 +152,10 @@ impl Connection {
         let text = self.execute(args, None, true)?;
         parse_records(&text)
     }
+    fn listing_records(&self, args: &[&str], warnings: &mut Vec<String>) -> Result<Vec<Value>> {
+        let text = self.execute(args, None, true)?;
+        parse_listing_records(&text, warnings)
+    }
     pub fn text(&self, args: &[&str]) -> Result<String> {
         self.execute(args, None, false)
     }
@@ -180,7 +187,8 @@ impl Connection {
         let n = limit.to_string();
         match tab {
             Tab::Status | Tab::Resolve => {
-                let opened = self.records(&["fstat", "-Ro", "-Or", scope])?;
+                let opened =
+                    self.listing_records(&["fstat", "-Ro", "-Or", scope], &mut view.warnings)?;
                 for r in opened.iter().filter(|r| r.get("depotFile").is_some()) {
                     let f = file(r, true);
                     if tab == Tab::Status || f.unresolved {
@@ -190,7 +198,9 @@ impl Connection {
                 if tab == Tab::Status {
                     let known: HashSet<String> =
                         view.items.iter().map(|i| i.key().to_string()).collect();
-                    for r in self.records(&["reconcile", "-n", "-f", scope])? {
+                    for r in
+                        self.listing_records(&["reconcile", "-n", "-f", scope], &mut view.warnings)?
+                    {
                         if r.get("depotFile").is_some() && !known.contains(&field(&r, "depotFile"))
                         {
                             view.items.push(Item::File(file(&r, false)));
@@ -229,7 +239,7 @@ impl Connection {
                 if tab != Tab::Changes {
                     args.push(scope);
                 }
-                let records = self.records(&args)?;
+                let records = self.listing_records(&args, &mut view.warnings)?;
                 if tab == Tab::Changes {
                     view.items.push(Item::Change {
                         id: "default".into(),
@@ -251,7 +261,8 @@ impl Connection {
                 view.limit_reached = records.len() >= limit;
             }
             Tab::Files => {
-                let records = self.records(&["fstat", "-m", &n, scope])?;
+                let records =
+                    self.listing_records(&["fstat", "-m", &n, scope], &mut view.warnings)?;
                 view.limit_reached = records.len() >= limit;
                 for r in records.iter().filter(|r| {
                     r.get("depotFile").is_some() && !field(r, "headAction").contains("delete")
@@ -261,7 +272,7 @@ impl Connection {
                 }
             }
             Tab::Streams => {
-                let records = self.records(&["streams", "-m", &n])?;
+                let records = self.listing_records(&["streams", "-m", &n], &mut view.warnings)?;
                 view.limit_reached = records.len() >= limit;
                 for r in records.iter().filter(|r| r.get("Stream").is_some()) {
                     view.items.push(Item::Stream {
@@ -272,7 +283,10 @@ impl Connection {
                 }
             }
             Tab::Workspaces => {
-                let records = self.records(&["clients", "-u", &view.info.user, "-m", &n])?;
+                let records = self.listing_records(
+                    &["clients", "-u", &view.info.user, "-m", &n],
+                    &mut view.warnings,
+                )?;
                 view.limit_reached = records.len() >= limit;
                 for r in records.iter().filter(|r| r.get("client").is_some()) {
                     view.items.push(Item::Workspace {
@@ -283,7 +297,7 @@ impl Connection {
                 }
             }
             Tab::Labels => {
-                let records = self.records(&["labels", "-m", &n])?;
+                let records = self.listing_records(&["labels", "-m", &n], &mut view.warnings)?;
                 view.limit_reached = records.len() >= limit;
                 for r in records.iter().filter(|r| r.get("label").is_some()) {
                     view.items.push(Item::Label {
@@ -706,6 +720,14 @@ fn file(r: &Value, opened: bool) -> FileEntry {
 }
 /// EV_EMPTY (17) means no matching records; authentication/permission failures never do.
 pub fn parse_records(text: &str) -> Result<Vec<Value>> {
+    let mut warnings = Vec::new();
+    let records = parse_listing_records(text, &mut warnings)?;
+    // Mutations and clean-workspace preflights must not treat partial results as
+    // complete success. Only tab listings can return data alongside warnings.
+    ensure!(warnings.is_empty(), "p4 warning: {}", warnings.join("\n"));
+    Ok(records)
+}
+fn parse_listing_records(text: &str, warnings: &mut Vec<String>) -> Result<Vec<Value>> {
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -718,7 +740,7 @@ pub fn parse_records(text: &str) -> Result<Vec<Value>> {
         } else if severity > 0 && generic == 17 {
             continue;
         } else if severity == 2 {
-            bail!("p4 warning: {}", field(&r, "data"));
+            warnings.push(field(&r, "data").trim_end().to_string());
         } else {
             records.push(r);
         }
@@ -848,6 +870,53 @@ mod tests {
         assert!(
             parse_records("{\"severity\":2,\"generic\":6,\"data\":\"maxresults exceeded\"}")
                 .is_err()
+        );
+    }
+    #[test]
+    fn listings_preserve_partial_results_and_warnings_but_errors_remain_fatal() {
+        let text = r#"{"depotFile":"//depot/opened.txt","action":"edit"}
+{"severity":2,"generic":4,"data":"/workspace/./ordinary.xml - can't reconcile filename with illegal characters.\n"}
+{"depotFile":"//depot/new.txt","action":"add"}"#;
+        let mut warnings = Vec::new();
+        let records = parse_listing_records(text, &mut warnings).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("illegal characters"));
+        assert!(
+            parse_records(text).is_err(),
+            "Mutations/preflight must still be strict"
+        );
+        let fatal = format!(
+            "{text}\n{}",
+            r#"{"severity":3,"generic":36,"data":"Permission denied"}"#
+        );
+        assert!(parse_listing_records(&fatal, &mut Vec::new()).is_err());
+        let mut warnings = Vec::new();
+        let limited = parse_listing_records(
+            r#"{"severity":2,"generic":6,"data":"maxresults exceeded"}"#,
+            &mut warnings,
+        )
+        .unwrap();
+        assert!(limited.is_empty());
+        assert_eq!(warnings, ["maxresults exceeded"]);
+    }
+    #[test]
+    fn connection_removes_dot_components_without_resolving_symlinks_or_parents() {
+        let connection = Connection::new(
+            PathBuf::from("/logical/link/./workspace/."),
+            &Config::default(),
+        );
+        assert_eq!(
+            connection.directory.to_string_lossy().replace('\\', "/"),
+            "/logical/link/workspace"
+        );
+        let connection = Connection::new(
+            PathBuf::from("/logical/link/../workspace/."),
+            &Config::default(),
+        );
+        assert_eq!(
+            connection.directory.to_string_lossy().replace('\\', "/"),
+            "/logical/link/../workspace"
         );
     }
     #[test]

@@ -281,8 +281,16 @@ impl App {
                                     .and_then(|k| self.visible().iter().position(|i| i.key() == k))
                                     .unwrap_or(self.selected)
                                     .min(self.visible().len().saturating_sub(1));
+                                let warnings = if self.view.warnings.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        " · {} warnings (? for details; results may be incomplete)",
+                                        self.view.warnings.len()
+                                    )
+                                };
                                 self.status = format!(
-                                    "{} items · scope: current directory and descendants",
+                                    "{} items{warnings} · scope: current directory and descendants",
                                     self.view.items.len()
                                 );
                                 self.detail_needed = true;

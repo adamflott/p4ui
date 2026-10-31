@@ -14,6 +14,7 @@
 - Spaces, Unicode, reserved Perforce filename characters, binary files and symlinks.
 - Move/rename, lock/unlock and sync.
 - Client selection, label/stream listing and current-directory/ignore scoping.
+- Default / dot-suffixed launch directories without spurious illegal-filename warnings; lexical cleanup preserves symlink spelling.
 - Invalid workspaces, output limits and permission failures.
 - CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.
 - Concurrent edits from two workspaces, failed submits, safe resolve preserving conflicts, explicit resolution and successful resubmit.
@@ -25,7 +26,7 @@ To regenerate the sample screenshot: `cargo run --example snapshot > docs/status
 
 ## Failure semantics
 
-A nonzero `p4` exit or severity-3 structured error is never presented as success. No-result warnings are distinguished from permissions/authentication errors; other warnings are surfaced. A command can have partially succeeded before failure. Refresh and inspect pending changes before retrying. Default submit failures may create numbered pending changelists.
+A nonzero `p4` exit or severity-3 structured error is never presented as success. No-result warnings are distinguished from permissions/authentication errors. Workspace tab listings retain usable records alongside nonfatal warnings; the status bar flags incomplete results and `?` shows the full messages. Mutating commands and clean-workspace preflights remain strict about warnings. A command can have partially succeeded before failure. Refresh and inspect pending changes before retrying. Default submit failures may create numbered pending changelists.
 
 The CLI runs without a shell. Only the explicit editor command is parsed into an executable/arguments; even there, shell expressions are not evaluated. The terminal is restored on regular errors, panics and handled termination signals. Active mutations are allowed to finish before a normal exit/handled termination. A timeout kills the local client; it cannot guarantee server rollback. Read-only child requests are cancelled and reaped when the worker shuts down.
 

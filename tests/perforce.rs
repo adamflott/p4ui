@@ -762,3 +762,60 @@ fn cli_p4port_environment_and_connection_precedence() -> Result<()> {
     ensure!(help.contains("P4PORT") && !help.contains("private-server.example"));
     Ok(())
 }
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn cli_default_and_dot_directory_paths_reconcile_without_spurious_warnings() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.write("ordinary.xml", "<test/>\n")?;
+    let config = fixture._dir.path().join("p4ui.toml");
+    std::fs::write(&config, "refresh_seconds = 0\n")?;
+    for directory in [None, Some("."), Some("./")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_p4ui"));
+        command
+            .current_dir(&fixture.connection.directory)
+            .envs(fixture.connection.environment.iter().cloned())
+            .env("PWD", &fixture.connection.directory)
+            .env(
+                "P4PORT",
+                fixture
+                    .connection
+                    .port
+                    .as_deref()
+                    .context("Fixture port missing")?,
+            )
+            .env("P4USER", "tester")
+            .env("P4CLIENT", "test")
+            .arg("--config")
+            .arg(&config)
+            .arg("--status");
+        if let Some(directory) = directory {
+            command.args(["--directory", directory]);
+        }
+        let output = command.output()?;
+        ensure!(
+            output.status.success(),
+            "p4ui failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let view: View = serde_json::from_slice(&output.stdout)?;
+        ensure!(
+            view.warnings.is_empty(),
+            "Unexpected warnings: {:?}",
+            view.warnings
+        );
+        ensure!(view.items.len() == 1);
+        if let Item::File(file) = &view.items[0] {
+            ensure!(
+                !file.local.contains("/./"),
+                "Unnormalized local path: {}",
+                file.local
+            );
+            ensure!(!file.opened && file.action == "add");
+        } else {
+            anyhow::bail!("Expected offline file");
+        }
+    }
+    // Every invocation above is read-only: the fixture must still have no open files.
+    ensure!(fixture.connection.records(&["opened", "..."])?.is_empty());
+    Ok(())
+}
