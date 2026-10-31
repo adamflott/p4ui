@@ -3,7 +3,7 @@
 %global debug_package %{nil}
 
 Name:           p4ui
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Keyboard-driven terminal interface for Perforce
 License:        MIT
@@ -41,5 +41,10 @@ install -Dm755 target/release/p4ui %{buildroot}%{_bindir}/p4ui
 %doc README.md CONTRIBUTING.md docs/BUILDING.md docs/RELEASING.md docs/PARITY.md docs/TESTING.md
 
 %changelog
+* Sat Oct 31 2026 Adam Flott <adam@adamflott.com> - 0.2.0-1
+- Viewport-sized history pages with scroll loading and responsive tab switches
+- P4PORT connections and nonfatal workspace warning handling
+- Tagged release packages, vendored source, and checksums
+
 * Sat Oct 31 2026 Adam Flott <adam@adamflott.com> - 0.1.0-1
 - Initial upstream package

@@ -24,7 +24,7 @@ cargo run --release -- -d /path/to/workspace
 p4ui -p ssl:perforce.example.com:1666 -u alice -c alice-workspace
 p4ui --check               # connection/workspace diagnostics
 p4ui --status              # machine-readable workspace status, no TTY needed
-p4ui --log                 # one bounded history window as JSON; no workspace scan
+p4ui --log                 # one history page as JSON; no workspace scan
 p4ui --tab log             # open directly in Log without loading Status
 p4ui --help
 ```

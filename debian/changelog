@@ -1,3 +1,12 @@
+p4ui (0.2.0-1) unstable; urgency=medium
+
+  * Load viewport-sized history pages and fetch older changes while scrolling.
+  * Cancel obsolete background reads and preserve active mutations.
+  * Support P4PORT and retain usable results alongside workspace warnings.
+  * Publish tagged Linux packages, vendored source, and checksums.
+
+ -- Adam Flott <adam@adamflott.com>  Sat, 31 Oct 2026 22:52:00 +0000
+
 p4ui (0.1.0-1) unstable; urgency=medium
 
   * Initial upstream release and local Debian/Ubuntu packaging.
