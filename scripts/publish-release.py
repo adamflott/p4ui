@@ -52,6 +52,11 @@ def verify_published_release(tag, directory, repo):
     """Verify original published bytes; rebuilding can change package timestamps."""
     directory.mkdir()
     gh("release", "download", tag, "--repo", repo, "--dir", str(directory))
+    verify_release_directory(tag, directory)
+
+
+def verify_release_directory(tag, directory):
+    """Validate downloaded draft or public assets against their own manifest."""
     checksum_file = directory / "SHA256SUMS"
     if not checksum_file.is_file():
         raise ValueError("Published release is incomplete: SHA256SUMS is missing; assets left unchanged")
@@ -73,7 +78,7 @@ def verify_published_release(tag, directory, repo):
             raise ValueError(f"Published checksum failed for {path.name}; assets left unchanged")
 
 
-def publish(tag, commit, directory, repo, dry_run=False):
+def publish(tag, commit, directory, repo, dry_run=False, draft_only=False):
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Expected the validated full Git commit SHA")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -106,6 +111,9 @@ def publish(tag, commit, directory, repo, dry_run=False):
                "--draft", "--title", f"p4ui {tag}", "--generate-notes")
         # A failed upload leaves a draft; a retry can replace draft assets safely.
         gh("release", "upload", tag, *map(str, [*staged, checksums]), "--repo", repo, "--clobber")
+        if draft_only:
+            print(f"Prepared draft {tag}; the release command must verify and publish it")
+            return
         gh("release", "edit", tag, "--repo", repo, "--verify-tag", "--draft=false")
         print(f"Published https://github.com/{repo}/releases/tag/{tag}")
 
@@ -117,8 +125,9 @@ def main():
     parser.add_argument("artifacts", type=pathlib.Path)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Validate files and compute checksums without contacting GitHub")
+    parser.add_argument("--draft-only", action="store_true", help="Upload a managed release draft without publishing")
     args = parser.parse_args()
-    publish(args.tag, args.commit, args.artifacts, args.repo, args.dry_run)
+    publish(args.tag, args.commit, args.artifacts, args.repo, args.dry_run, args.draft_only)
 
 
 if __name__ == "__main__":

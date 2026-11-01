@@ -172,6 +172,23 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(calls.call_args_list[-1].args[:3], ('release', 'edit', 'v0.1.0'))
                 self.assertIn('--draft=false', calls.call_args_list[-1].args)
 
+    def test_managed_release_uploads_a_draft_without_publishing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = pathlib.Path(temp)
+            self.assets(directory)
+            def gh(*args, **kwargs):
+                if args[0] == 'api':
+                    return subprocess.CompletedProcess(args, 0, 'a' * 40, '')
+                if args[:2] == ('release', 'view'):
+                    return subprocess.CompletedProcess(args, 1, '', 'not found')
+                return subprocess.CompletedProcess(args, 0, '', '')
+            with mock.patch.object(publisher, 'gh', side_effect=gh) as calls:
+                publisher.publish('v0.1.0', 'a' * 40, directory, 'owner/repo', draft_only=True)
+                commands = [call.args for call in calls.call_args_list]
+                self.assertTrue(any(args[:2] == ('release', 'create') and '--draft' in args for args in commands))
+                self.assertTrue(any(args[:2] == ('release', 'upload') for args in commands))
+                self.assertFalse(any(args[:2] == ('release', 'edit') for args in commands))
+
     def published_gh(self, directory, mode="complete"):
         def gh(*args, **kwargs):
             if args[0] == 'api':

@@ -10,6 +10,20 @@ import tomllib
 STABLE_VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 
 
+def release_mode(root, tag):
+    if not tag:
+        return "auto"
+    ref = f"refs/tags/{tag}"
+    kind = subprocess.check_output(["git", "cat-file", "-t", ref], cwd=root, text=True).strip()
+    if kind != "tag":
+        return "auto"
+    message = subprocess.check_output(["git", "for-each-ref", "--format=%(contents)", ref], cwd=root, text=True)
+    markers = [line for line in message.splitlines() if line.startswith("p4ui-release-mode:")]
+    if markers and markers != ["p4ui-release-mode: managed"]:
+        raise ValueError("Invalid or duplicate release mode marker")
+    return "managed" if markers else "auto"
+
+
 def validate_versions(files, tag=""):
     version = tomllib.loads(files["Cargo.toml"])["package"]["version"]
     if not re.fullmatch(STABLE_VERSION, version):
@@ -40,9 +54,10 @@ def main():
     files = {name: subprocess.check_output(["git", "show", f"{commit}:{name}"], cwd=root, text=True)
              for name in ("Cargo.toml", "Cargo.lock", "debian/changelog", "packaging/rpm/p4ui.spec")}
     version = validate_versions(files, args.tag)
+    mode = release_mode(root, args.tag)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-            output.write(f"source_sha={commit}\ntag={args.tag}\nversion={version}\n")
+            output.write(f"source_sha={commit}\ntag={args.tag}\nversion={version}\nrelease_mode={mode}\n")
     print(f"Validated p4ui {version} at {commit}" + (f" for tag {args.tag}" if args.tag else " (build only)"))
 
 

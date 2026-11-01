@@ -49,7 +49,15 @@ Selecting a workspace keeps the current server, user, and character set for the 
 
 ## Build and native packages
 
-See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Branch builds upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). Pushing a stable `vX.Y.Z` tag automatically publishes all packages under [Releases](https://github.com/adamflott/p4ui/releases) after the package and full CI checks pass. See [Releasing](docs/RELEASING.md) for version updates and existing-tag releases. These are upstream packages; availability in official distro repositories is tracked separately.
+See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Branch builds upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). Pushing an ordinary stable `vX.Y.Z` tag automatically publishes all packages under [Releases](https://github.com/adamflott/p4ui/releases) after the package and full CI checks pass. Command-managed tags prepare drafts for final verification. See [Releasing](docs/RELEASING.md) for version updates and existing-tag releases. These are upstream packages; availability in official distro repositories is tracked separately.
+
+Maintainers can prepare and publish a new stable version with one command:
+
+```sh
+./scripts/release.py 0.2.1
+```
+
+Run from a clean, synchronized default branch after pushing source changes. The command updates version metadata and release notes, runs local and GitHub checks, verifies package checksums, and publishes only after all checks pass. See [Releasing](docs/RELEASING.md) for prerequisites, `--check`, and `--resume`.
 
 ## Workflow
 

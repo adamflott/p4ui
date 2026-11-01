@@ -32,6 +32,8 @@
 
 To regenerate the sample screenshot: `cargo run --example snapshot > docs/status.svg`. This is deterministic sample data, not a live server capture.
 
+`python3 tests/release.py` tests release preparation and failure handling using private Git repositories and local bare remotes, with simulated GitHub responses. It covers version/changelog/document consistency, preserving locked dependencies, clean/current branch requirements, concurrent local/remote changes, unsupported/rejected atomic pushes, tag identity, failed/skipped checks, checksum failures, managed drafts, and resume/idempotence. No external publication occurs. See [RELEASING.md](RELEASING.md) for the complete `--check` command.
+
 ## Failure semantics
 
 A nonzero `p4` exit or severity-3 structured error is never presented as success. No-result warnings are distinguished from permissions/authentication errors. Workspace tab listings retain usable records alongside nonfatal warnings; the status bar flags incomplete results and `?` shows the full messages. Mutating commands and clean-workspace preflights remain strict about warnings. A command can have partially succeeded before failure. Refresh and inspect pending changes before retrying. Default submit failures may create numbered pending changelists.
