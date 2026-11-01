@@ -152,16 +152,64 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(calls.call_args_list[-1].args[:3], ('release', 'edit', 'v0.1.0'))
                 self.assertIn('--draft=false', calls.call_args_list[-1].args)
 
-    def test_published_releases_and_moved_tags_are_never_overwritten(self):
+    def published_gh(self, directory, mode="complete"):
+        def gh(*args, **kwargs):
+            if args[0] == 'api':
+                return subprocess.CompletedProcess(args, 0, 'a' * 40, '')
+            if args[:2] == ('release', 'view'):
+                return subprocess.CompletedProcess(args, 0, json.dumps({'isDraft': False}), '')
+            self.assertEqual(args[:2], ('release', 'download'), "Public release must never be mutated")
+            destination = pathlib.Path(args[args.index('--dir') + 1])
+            manifest = []
+            downloaded = []
+            for path in sorted(directory.iterdir()):
+                if mode == 'missing_package' and path.name.endswith('.pkg.tar.zst'):
+                    continue
+                # Released packages may differ from a fresh rebuild. Verify the
+                # original published checksums, rather than the new build's bytes.
+                data = b'original released bytes: ' + path.read_bytes()
+                target = destination / path.name
+                target.write_bytes(data)
+                downloaded.append(target)
+                manifest.append(f"{hashlib.sha256(data).hexdigest()}  {path.name}")
+            if mode == 'missing_entry':
+                manifest.pop()
+            elif mode == 'duplicate':
+                manifest.append(manifest[0])
+            elif mode == 'malformed':
+                manifest[0] = 'invalid checksum entry'
+            elif mode == 'corrupt':
+                downloaded[0].write_bytes(b'corrupt')
+            elif mode == 'unexpected':
+                (destination / 'unexpected.txt').write_text('unexpected')
+            if mode != 'missing_checksums':
+                (destination / 'SHA256SUMS').write_text('\n'.join(manifest) + '\n')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        return gh
+
+    def test_complete_published_release_is_verified_without_replacing_its_bytes(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = pathlib.Path(temp)
             self.assets(directory)
-            with mock.patch.object(publisher, 'gh', side_effect=[
-                subprocess.CompletedProcess([], 0, 'a' * 40, ''),
-                subprocess.CompletedProcess([], 0, json.dumps({'isDraft': False}), '')
-            ]) as calls:
+            with mock.patch.object(publisher, 'gh', side_effect=self.published_gh(directory)) as calls:
                 publisher.publish('v0.1.0', 'a' * 40, directory, 'owner/repo')
-                self.assertEqual(calls.call_count, 2)
+                self.assertEqual(calls.call_count, 3)
+
+    def test_incomplete_or_corrupt_public_release_fails_without_mutation(self):
+        for mode in ('missing_checksums', 'missing_package', 'missing_entry', 'duplicate',
+                     'malformed', 'corrupt', 'unexpected'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                directory = pathlib.Path(temp)
+                self.assets(directory)
+                with mock.patch.object(publisher, 'gh', side_effect=self.published_gh(directory, mode)) as calls:
+                    with self.assertRaises(ValueError):
+                        publisher.publish('v0.1.0', 'a' * 40, directory, 'owner/repo')
+                    self.assertEqual(calls.call_count, 3)
+
+    def test_moved_tags_are_never_published(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = pathlib.Path(temp)
+            self.assets(directory)
             with mock.patch.object(publisher, 'gh', return_value=subprocess.CompletedProcess([], 0, 'b' * 40, '')) as calls:
                 with self.assertRaisesRegex(ValueError, 'no longer matches'):
                     publisher.publish('v0.1.0', 'a' * 40, directory, 'owner/repo')

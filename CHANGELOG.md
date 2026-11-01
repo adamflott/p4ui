@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Release reruns verify existing public assets and their published checksums, and fail for incomplete releases without overwriting released files.
 - Tagged package publication requires the full CI suite to pass for the exact validated source commit.
 - Long input paragraphs scroll by their rendered lines, keeping the cursor visible after wrapping and resizing.
 - Returning from changelist files restores the parent list's filter, selected change, viewport and history cursor.

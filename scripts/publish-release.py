@@ -48,6 +48,31 @@ def gh(*args, check=True):
     return result
 
 
+def verify_published_release(tag, directory, repo):
+    """Verify original published bytes; rebuilding can change package timestamps."""
+    directory.mkdir()
+    gh("release", "download", tag, "--repo", repo, "--dir", str(directory))
+    checksum_file = directory / "SHA256SUMS"
+    if not checksum_file.is_file():
+        raise ValueError("Published release is incomplete: SHA256SUMS is missing; assets left unchanged")
+    lines = checksum_file.read_text().splitlines()
+    checksum_file.unlink()  # Only the temporary local copy; collect_assets checks packages below.
+    assets = collect_assets(directory, tag)
+    expected = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  ([^\r\n]+)", line)
+        if match is None or match[2] in expected:
+            raise ValueError("Published SHA256SUMS is malformed or has duplicate entries; assets left unchanged")
+        expected[match[2]] = match[1]
+    if set(expected) != {path.name for path in assets}:
+        raise ValueError("Published package assets and SHA256SUMS do not match; assets left unchanged")
+    for path in assets:
+        with path.open("rb") as data:
+            digest = hashlib.file_digest(data, "sha256").hexdigest()
+        if digest != expected[path.name]:
+            raise ValueError(f"Published checksum failed for {path.name}; assets left unchanged")
+
+
 def publish(tag, commit, directory, repo, dry_run=False):
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Expected the validated full Git commit SHA")
@@ -73,7 +98,8 @@ def publish(tag, commit, directory, repo, dry_run=False):
             raise ValueError("The remote release tag no longer matches the built commit")
         existing = gh("release", "view", tag, "--repo", repo, "--json", "isDraft,url", check=False)
         if existing.returncode == 0 and not json.loads(existing.stdout)["isDraft"]:
-            print(f"Release {tag} is already published; leaving published assets unchanged")
+            verify_published_release(tag, stage / "published", repo)
+            print(f"Release {tag} is already published and verified complete; leaving published assets unchanged")
             return
         if existing.returncode:
             gh("release", "create", tag, "--repo", repo, "--verify-tag", "--target", commit,
