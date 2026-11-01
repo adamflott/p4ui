@@ -45,6 +45,8 @@ For the server address, p4ui uses `--port` / `-p` first, then a nonempty `P4PORT
 
 Run from the workspace root to operate on the whole workspace. Status, history, files, sync, reconcile, merge, and copy use the current directory and its descendants. **Submit and shelve operate on the entire changelist**, including files outside that directory. Enter on a pending changelist shows its complete file list.
 
+Selecting a workspace keeps the current server, user, and character set for the session. A `P4CONFIG` file in the selected workspace cannot redirect that connection. To connect to a different server or user, start another p4ui instance with the desired settings.
+
 ## Build and native packages
 
 See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac instructions, distro build prerequisites, and `.deb`, `.rpm`, and Arch package recipes. Branch builds upload downloadable artifacts to [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). Pushing a stable `vX.Y.Z` tag automatically publishes all packages under [Releases](https://github.com/adamflott/p4ui/releases) after the package checks pass. See [Releasing](docs/RELEASING.md) for version updates and existing-tag releases. These are upstream packages; availability in official distro repositories is tracked separately.

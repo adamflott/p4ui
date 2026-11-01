@@ -49,6 +49,51 @@ fn excessive_output_is_reported_without_loading_it_all() -> Result<()> {
     Ok(())
 }
 #[test]
+fn failed_workspace_switch_preserves_original_connection() -> Result<()> {
+    use p4ui::model::Action;
+    let source = r#"import json,os,pathlib,sys
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+if 'set' in args:
+ if os.environ['FAILURE']=='settings':
+  print('Settings unavailable',file=sys.stderr);sys.exit(1)
+ print('P4PORT=ssl:broker.example:1666\nP4CHARSET=none')
+elif 'client' in args:
+ assert args[args.index('-p')+1]=='ssl:broker.example:1666'
+ assert args[args.index('-u')+1]=='tester'
+ print(json.dumps({'Root':str(root/'other')}))
+elif 'info' in args:
+ if pathlib.Path(args[args.index('-d')+1])==root/'other':
+  print(json.dumps({'severity':3,'data':'Workspace unavailable'}));sys.exit(1)
+ print(json.dumps({'userName':'tester','clientName':'test','clientRoot':str(root),'serverAddress':'internal.example:1666'}))
+else: raise AssertionError('Unexpected command: '+repr(args))
+"#;
+    for failure in ["settings", "validation"] {
+        let (dir, mut connection) = fake(source)?;
+        std::fs::create_dir(dir.path().join("other"))?;
+        connection
+            .environment
+            .push(("FAILURE".into(), failure.into()));
+        let original_directory = connection.directory.clone();
+        let error = connection
+            .act(Action::SwitchWorkspace("other".into()))
+            .err()
+            .context("Expected workspace switch failure")?;
+        assert!(format!("{error:#}").contains(if failure == "settings" {
+            "Settings unavailable"
+        } else {
+            "Workspace unavailable"
+        }));
+        assert_eq!(connection.directory, original_directory);
+        assert!(connection.port.is_none());
+        assert!(connection.user.is_none());
+        assert!(connection.client.is_none());
+        assert!(connection.charset.is_none());
+        assert_eq!(connection.info()?.client, "test");
+    }
+    Ok(())
+}
+#[test]
 fn workspace_listing_keeps_files_and_warnings_while_mutations_fail() -> Result<()> {
     use p4ui::model::{Action, Tab};
     let source = r#"import json,sys

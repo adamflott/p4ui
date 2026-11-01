@@ -14,6 +14,7 @@
 - Spaces, Unicode, reserved Perforce filename characters, binary files and symlinks.
 - Move/rename, lock/unlock and sync.
 - Client selection, label/stream listing and current-directory/ignore scoping.
+- Workspace switching across conflicting `P4CONFIG` files preserves the original server transport, user and charset, including explicit connection overrides.
 - Default / dot-suffixed launch directories without spurious illegal-filename warnings; lexical cleanup preserves symlink spelling.
 - Invalid workspaces, output limits and permission failures.
 - Cursor paging through sparse scoped history without duplicate/missing changes, seeking across large server-counter gaps and gaps between scoped changes.

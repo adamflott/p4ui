@@ -463,6 +463,132 @@ fn workspace_selection_labels_and_stream_listing() -> Result<()> {
 }
 #[test]
 #[ignore = "requires p4 and p4d"]
+fn workspace_switch_preserves_connection_identity_across_configs() -> Result<()> {
+    let source = Fixture::new()?;
+    let destination = Fixture::new()?;
+    let source_port = source.connection.port.as_deref().context("Source port")?;
+    let destination_port = destination
+        .connection
+        .port
+        .as_deref()
+        .context("Destination port")?;
+    source
+        .connection
+        .records(&["counter", "p4ui-server", "111"])?;
+    destination
+        .connection
+        .records(&["counter", "p4ui-server", "222"])?;
+    // Both servers have the selected client, so checking only `p4 info` after
+    // changing directories would accept the destination config's wrong server.
+    let form = format!(
+        "Client: other\nOwner: tester\nRoot: {}\nView:\n\t//depot/... //other/...\n",
+        destination.connection.directory.display()
+    );
+    for connection in [&source.connection, &destination.connection] {
+        connection.execute(&["client", "-i"], Some(&form), false)?;
+    }
+    for (explicit, charset) in [(false, Some("none")), (false, None), (true, Some("none"))] {
+        let mut connection = source.connection.clone();
+        connection.port = explicit.then(|| source_port.to_owned());
+        connection.user = explicit.then(|| "tester".into());
+        connection.charset = explicit.then(|| "none".into());
+        connection.environment.retain(|(key, _)| key != "P4CONFIG");
+        connection.environment.extend([
+            ("P4CONFIG".into(), ".p4ui-switch-config".into()),
+            ("P4PORT".into(), String::new()),
+            ("P4USER".into(), String::new()),
+        ]);
+        let (configured_port, configured_user, configured_charset) = if explicit {
+            (destination_port, "destination-user", Some("utf8"))
+        } else {
+            (source_port, "tester", charset)
+        };
+        let charset_line = configured_charset
+            .map(|value| format!("P4CHARSET={value}\n"))
+            .unwrap_or_default();
+        source.write(
+            ".p4ui-switch-config",
+            &format!("P4PORT={configured_port}\nP4USER={configured_user}\n{charset_line}"),
+        )?;
+        destination.write(
+            ".p4ui-switch-config",
+            &format!("P4PORT={destination_port}\nP4USER=destination-user\nP4CHARSET=none\n"),
+        )?;
+        ensure!(connection.info()?.user == "tester");
+        connection.act(Action::SwitchWorkspace("other".into()))?;
+        let marker = connection.records(&["counter", "p4ui-server"])?;
+        ensure!(
+            marker.first().map(|row| field(row, "value")).as_deref() == Some("111"),
+            "Workspace switch changed servers"
+        );
+        let info = connection.info()?;
+        ensure!(info.user == "tester" && info.client == "other");
+        ensure!(connection.directory == destination.connection.directory);
+        // Preserve the actual endpoint, including its transport and arguments;
+        // serverAddress from `info` is not a substitute for a broker/SSL/rsh URL.
+        ensure!(connection.port.as_deref() == Some(source_port));
+        if let Some(charset) = charset {
+            ensure!(connection.charset.as_deref() == Some(charset));
+        }
+    }
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn workspace_switch_preserves_unicode_autodetection() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let conversion = Command::new("p4d")
+        .arg("-r")
+        .arg(f._dir.path().join("server"))
+        .arg("-xi")
+        .output()?;
+    ensure!(
+        conversion.status.success(),
+        "Unicode fixture setup failed: {}{}",
+        String::from_utf8_lossy(&conversion.stdout),
+        String::from_utf8_lossy(&conversion.stderr)
+    );
+    // Discard any non-Unicode charset detection cached before conversion.
+    std::fs::write(f._dir.path().join("env"), "")?;
+    let other = f._dir.path().join("other");
+    std::fs::create_dir(&other)?;
+    f.connection.execute(
+        &["client", "-i"],
+        Some(&format!(
+            "Client: other\nOwner: tester\nRoot: {}\nView:\n\t//depot/... //other/...\n",
+            other.display()
+        )),
+        false,
+    )?;
+    let port = f.connection.port.take().context("Source port")?;
+    f.connection.user = None;
+    f.connection
+        .environment
+        .retain(|(key, _)| key != "P4CONFIG");
+    f.connection.environment.extend([
+        ("P4CONFIG".into(), ".p4ui-switch-config".into()),
+        ("P4PORT".into(), String::new()),
+        ("P4USER".into(), String::new()),
+    ]);
+    f.write(
+        ".p4ui-switch-config",
+        &format!("P4PORT={port}\nP4USER=tester\n"),
+    )?;
+    std::fs::write(
+        other.join(".p4ui-switch-config"),
+        "P4PORT=wrong-server.invalid:1666\nP4USER=wrong-user\nP4CHARSET=none\n",
+    )?;
+    f.connection.act(Action::SwitchWorkspace("other".into()))?;
+    ensure!(f.connection.charset.as_deref() == Some("auto"));
+    ensure!(f.connection.user.as_deref() == Some("tester"));
+    ensure!(f.connection.port.as_deref() == Some(port.as_str()));
+    // `info` alone accepts otherwise invalid charset/server combinations.
+    let spec = f.connection.records(&["client", "-o", "other"])?;
+    ensure!(spec.first().map(|row| field(row, "Client")).as_deref() == Some("other"));
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
 fn concurrent_edits_conflict_detection_and_resolve() -> Result<()> {
     let mut f = Fixture::new()?;
     f.seed()?;

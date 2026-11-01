@@ -191,23 +191,60 @@ impl Connection {
     pub fn text(&self, args: &[&str]) -> Result<String> {
         self.execute(args, None, false)
     }
+    fn raw_info(&self) -> Result<Value> {
+        self.records(&["info"])?
+            .into_iter()
+            .next()
+            .context("p4 info returned no connection information")
+    }
     pub fn info(&self) -> Result<Info> {
-        let records = self.records(&["info"])?;
-        let r = records
-            .first()
-            .context("p4 info returned no connection information")?;
+        let r = self.raw_info()?;
         let info = Info {
-            user: field(r, "userName"),
-            client: field(r, "clientName"),
-            root: field(r, "clientRoot"),
-            server: field(r, "serverAddress"),
-            stream: field(r, "clientStream"),
+            user: field(&r, "userName"),
+            client: field(&r, "clientName"),
+            root: field(&r, "clientRoot"),
+            server: field(&r, "serverAddress"),
+            stream: field(&r, "clientStream"),
         };
         ensure!(
             !info.client.is_empty() && info.client != "*unknown*" && !info.root.is_empty(),
             "No configured workspace. Set P4CLIENT, use --client, or create a workspace with p4 client first. Run p4 login if authentication is required."
         );
         Ok(info)
+    }
+    fn pin_identity(&mut self) -> Result<()> {
+        // Resolve settings in the original directory before another workspace's
+        // P4CONFIG can change them. `info.serverAddress` may name a server behind
+        // a broker/proxy and does not retain SSL or rsh transport information.
+        let settings = self
+            .text(&["set", "-q", "P4PORT", "P4CHARSET"])
+            .context("Resolving connection settings before switching workspaces")?;
+        let setting = |name| {
+            settings
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .find(|(key, value)| *key == name && !value.is_empty())
+                .map(|(_, value)| value.to_owned())
+        };
+        self.port
+            .get_or_insert_with(|| setting("P4PORT").unwrap_or_else(|| "perforce:1666".into()));
+        let info = self.raw_info()?;
+        // Preserve server/locale autodetection for Unicode servers. Explicit
+        // `auto` is rejected by non-Unicode servers on commands such as client.
+        let default_charset = if field(&info, "unicode") == "enabled" {
+            "auto"
+        } else {
+            "none"
+        };
+        self.charset
+            .get_or_insert_with(|| setting("P4CHARSET").unwrap_or_else(|| default_charset.into()));
+        if self.user.is_none() {
+            // Unlike `p4 set`, info also resolves the default OS username.
+            let user = field(&info, "userName");
+            ensure!(!user.is_empty(), "p4 info returned no connection user");
+            self.user = Some(user);
+        }
+        Ok(())
     }
     pub fn load(&self, tab: Tab, limit: usize) -> Result<View> {
         if matches!(tab, Tab::Status | Tab::Resolve) {
@@ -809,7 +846,9 @@ impl Connection {
                     !name.is_empty() && !name.starts_with('-') && !name.contains(['\n', '\r']),
                     "Invalid workspace name"
                 );
-                let spec = self.records(&["client", "-o", &name])?;
+                let mut next = self.clone();
+                next.pin_identity()?;
+                let spec = next.records(&["client", "-o", &name])?;
                 let root = spec
                     .first()
                     .map(|r| field(r, "Root"))
@@ -819,7 +858,6 @@ impl Connection {
                     Path::new(&root).is_dir(),
                     "Workspace root does not exist on this machine: {root}"
                 );
-                let mut next = self.clone();
                 next.client = Some(name.clone());
                 next.directory = PathBuf::from(&root);
                 next.info()?;
