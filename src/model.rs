@@ -46,7 +46,7 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Info {
     pub user: String,
     pub client: String,

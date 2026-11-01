@@ -276,6 +276,88 @@ fn history_queries(path: &std::path::Path) -> Result<Vec<Vec<String>>> {
         .collect())
 }
 #[test]
+fn status_tab_roundtrip_restores_both_rendered_panes_after_fresh_loading() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{app::App, model::Tab, ui};
+    use ratatui::{Terminal, backend::TestBackend};
+    let source = r#"import json,pathlib,sys
+args=sys.argv[1:]
+def row(name,opened):
+ print(json.dumps({'depotFile':'//depot/'+name,'clientFile':'/workspace/'+name,
+                   'action':'edit','change':'default' if opened else ''}))
+if 'info' in args:
+ print(json.dumps({'userName':'tester','clientName':'test','clientRoot':'/workspace'}))
+elif 'fstat' in args:
+ if pathlib.Path(__file__).with_suffix('.insert').exists(): row('000_new_file',True)
+ for index in range(80): row('opened_file%03d'%index,True)
+elif 'reconcile' in args:
+ assert '-n' in args
+ for index in range(80): row('offline_file%03d'%index,False)
+elif 'labels' in args: pass
+elif 'diff' in args: print('File details')
+else: raise AssertionError('Unexpected command: '+repr(args))
+"#;
+    let (_directory, connection) = fake(source)?;
+    let insert = connection.executable.with_extension("insert");
+    let mut app = App::new(
+        Config {
+            refresh_seconds: 0,
+            ..Config::default()
+        },
+        connection,
+    );
+    drive_app(&mut app, |app| app.view.items.len() == 160 && !app.busy)?;
+    app.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+    for c in "file".chars() {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))?;
+    }
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let render = |app: &mut App| -> Result<(String, String)> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
+        terminal.draw(|frame| ui::draw(frame, app))?;
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (0..42)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+        Ok((row(4), row(16)))
+    };
+    for _ in 0..4 {
+        app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    }
+    render(&mut app)?;
+    app.scroll(72, true);
+    let before = render(&mut app)?;
+    assert!(before.0.contains("opened_file051"), "{}", before.0);
+    assert!(before.1.contains("offline_file043"), "{}", before.1);
+    assert_eq!(
+        app.current().context("No selected file")?.key(),
+        "//depot/offline_file052"
+    );
+    app.switch_tab(Tab::Labels);
+    drive_app(&mut app, |app| {
+        !app.busy && app.status.starts_with("0 items")
+    })?;
+    std::fs::write(insert, "insert")?;
+    app.switch_tab(Tab::Status);
+    assert!(
+        app.view.items.is_empty(),
+        "Refresh must not expose stale file records"
+    );
+    // Empty loading renders must not erase the saved viewport offsets.
+    render(&mut app)?;
+    drive_app(&mut app, |app| app.view.items.len() == 161 && !app.busy)?;
+    assert_eq!(app.filter, "file");
+    assert_eq!(
+        app.current().context("No restored file")?.key(),
+        "//depot/offline_file052"
+    );
+    assert_eq!(render(&mut app)?, before);
+    Ok(())
+}
+#[test]
 fn history_fills_viewport_and_pages_on_keyboard_wheel_and_resize() -> Result<()> {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use p4ui::{app::App, model::Tab};

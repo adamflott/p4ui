@@ -162,6 +162,17 @@ struct ParentView {
     list_states: [ratatui::widgets::ListState; 3],
 }
 
+struct StatusState {
+    info: Info,
+    selected_key: Option<String>,
+    selected: usize,
+    opened: Option<bool>,
+    pane_index: usize,
+    filter: String,
+    list_states: [ratatui::widgets::ListState; 3],
+    top_keys: [Option<String>; 2],
+}
+
 pub struct App {
     pub config: Config,
     pub tab: Tab,
@@ -185,6 +196,8 @@ pub struct App {
     pub limit: usize,
     pub drill: Option<String>,
     parent: Option<ParentView>,
+    status_state: Option<StatusState>,
+    status_restore_pending: bool,
     history_more_requested: bool,
     history_scroll_requested: bool,
     history_paging_blocked: bool,
@@ -229,6 +242,8 @@ impl App {
             limit,
             drill: None,
             parent: None,
+            status_state: None,
+            status_restore_pending: false,
             history_more_requested: false,
             history_scroll_requested: false,
             history_paging_blocked: false,
@@ -339,12 +354,25 @@ impl App {
                     if tab == self.tab && self.drill.is_none() {
                         match result {
                             Ok(view) => {
-                                let key = self.current().map(|i| i.key().to_string());
-                                if !self.view.info.client.is_empty()
+                                let mut key = self.current().map(|i| i.key().to_string());
+                                let restore = if tab == Tab::Status && self.status_restore_pending {
+                                    self.status_restore_pending = false;
+                                    self.status_state.take()
+                                } else {
+                                    None
+                                };
+                                let workspace_changed = !self.view.info.client.is_empty()
                                     && self.view.info.client != view.info.client
-                                {
+                                    || restore.as_ref().is_some_and(|state| {
+                                        !state.info.client.is_empty() && state.info != view.info
+                                    });
+                                if workspace_changed {
                                     self.target = "default".into();
                                     self.filter.clear();
+                                    self.selected = 0;
+                                    self.list_states = Default::default();
+                                    self.status_state = None;
+                                    key = None;
                                     self.selection_updated();
                                 }
                                 self.view = view;
@@ -352,6 +380,9 @@ impl App {
                                     .and_then(|k| self.visible().iter().position(|i| i.key() == k))
                                     .unwrap_or(self.selected)
                                     .min(self.visible().len().saturating_sub(1));
+                                if !workspace_changed && let Some(state) = restore {
+                                    self.restore_status_state(state);
+                                }
                                 let warnings = if self.view.warnings.is_empty() {
                                     String::new()
                                 } else {
@@ -389,6 +420,14 @@ impl App {
                 Response::Act(action, result) => {
                     match result {
                         Ok(text) => {
+                            if matches!(
+                                &action,
+                                Action::SwitchWorkspace(_) | Action::SwitchStream(_)
+                            ) {
+                                self.status_state = None;
+                                self.status_restore_pending = false;
+                                self.target = "default".into();
+                            }
                             if matches!(&action, Action::Submit(id, _) | Action::DeleteChange(id)
                                 if id == &self.target)
                             {
@@ -540,6 +579,20 @@ impl App {
         }
     }
     pub fn switch_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        // A quick round trip during a read retains the original bookmark.
+        // A newly typed filter starts fresh navigation instead of reviving old anchors.
+        if self.tab == Tab::Status
+            && (!self.status_restore_pending
+                || self
+                    .status_state
+                    .as_ref()
+                    .is_none_or(|state| state.filter != self.filter))
+        {
+            self.status_state = Some(self.capture_status_state());
+        }
         if self.busy
             && !self.mutating
             && let Some(worker) = &self.worker
@@ -557,9 +610,85 @@ impl App {
         self.view.items.clear();
         self.selected = 0;
         self.filter.clear();
+        self.status_restore_pending = false;
+        if tab == Tab::Status
+            && let Some(state) = &self.status_state
+        {
+            self.filter = state.filter.clone();
+            self.status_restore_pending = true;
+        }
         self.focus_detail = false;
         self.refresh_needed = true;
         self.selection_updated();
+    }
+    fn capture_status_state(&self) -> StatusState {
+        let visible = self.visible();
+        let current = visible.get(self.selected);
+        let opened = current.and_then(|item| match item {
+            Item::File(file) => Some(file.opened),
+            _ => None,
+        });
+        let pane_index = visible
+            .iter()
+            .take(self.selected)
+            .filter(|item| matches!(item, Item::File(file) if Some(file.opened) == opened))
+            .count();
+        let top_keys = std::array::from_fn(|pane| {
+            visible
+                .iter()
+                .filter(|item| matches!(item, Item::File(file) if file.opened == (pane == 0)))
+                .nth(self.list_states[pane].offset())
+                .map(|item| item.key().to_string())
+        });
+        StatusState {
+            info: self.view.info.clone(),
+            selected_key: current.map(|item| item.key().to_string()),
+            selected: self.selected,
+            opened,
+            pane_index,
+            filter: self.filter.clone(),
+            list_states: self.list_states,
+            top_keys,
+        }
+    }
+    fn restore_status_state(&mut self, state: StatusState) {
+        // Search input made while the refresh was running takes precedence.
+        if self.filter != state.filter {
+            return;
+        }
+        let visible = self.visible();
+        let same_pane: Vec<usize> = visible
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                matches!(item, Item::File(file) if Some(file.opened) == state.opened)
+                    .then_some(index)
+            })
+            .collect();
+        let selected = state
+            .selected_key
+            .as_deref()
+            .and_then(|key| visible.iter().position(|item| item.key() == key))
+            .or_else(|| {
+                same_pane
+                    .get(state.pane_index.min(same_pane.len().saturating_sub(1)))
+                    .copied()
+            })
+            .unwrap_or(state.selected)
+            .min(visible.len().saturating_sub(1));
+        let mut list_states = state.list_states;
+        for (pane, key) in state.top_keys.iter().enumerate() {
+            if let Some(key) = key
+                && let Some(offset) = visible
+                    .iter()
+                    .filter(|item| matches!(item, Item::File(file) if file.opened == (pane == 0)))
+                    .position(|item| item.key() == key)
+            {
+                *list_states[pane].offset_mut() = offset;
+            }
+        }
+        self.selected = selected;
+        self.list_states = list_states;
     }
     fn act(&mut self, action: Action) -> Result<()> {
         if self.busy {
@@ -1060,6 +1189,199 @@ mod tests {
     use crossterm::event::KeyModifiers;
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    fn status_view(opened: usize, offline: usize) -> View {
+        View {
+            info: Info {
+                user: "tester".into(),
+                client: "test".into(),
+                root: "/workspace".into(),
+                ..Default::default()
+            },
+            items: [(true, opened), (false, offline)]
+                .into_iter()
+                .flat_map(|(open, count)| {
+                    (0..count).map(move |n| {
+                        Item::File(FileEntry {
+                            depot: format!(
+                                "//depot/{}_file{n:03}",
+                                if open { "opened" } else { "offline" }
+                            ),
+                            opened: open,
+                            ..Default::default()
+                        })
+                    })
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+    fn reply(app: &mut App, response: Response) {
+        let (send, _requests) = mpsc::channel();
+        let (responses, receive) = mpsc::channel();
+        app.worker = Some(Worker {
+            send,
+            receive,
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        });
+        app.refresh_needed = false;
+        app.selection_changed = Instant::now();
+        responses.send(response).unwrap();
+        app.tick().unwrap();
+        app.worker = None;
+        app.busy = false;
+    }
+    #[test]
+    fn status_navigation_crosses_the_opened_offline_boundary() {
+        let mut app = App::for_view(Config::default(), status_view(2, 2));
+        app.key(key('j')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+        app.key(key('j')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
+        app.key(key('k')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn status_roundtrip_preserves_selection_filter_and_each_panes_top_file() {
+        let mut app = App::for_view(Config::default(), status_view(80, 80));
+        app.filter = "file".into();
+        app.selected = 132;
+        *app.list_states[0].offset_mut() = 51;
+        *app.list_states[1].offset_mut() = 43;
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        // Another round trip while the reload is pending cannot overwrite the bookmark.
+        app.switch_tab(Tab::Files);
+        app.switch_tab(Tab::Status);
+        let mut fresh = status_view(80, 80);
+        fresh.items.insert(
+            0,
+            Item::File(FileEntry {
+                depot: "//depot/000_new_file".into(),
+                opened: true,
+                ..Default::default()
+            }),
+        );
+        reply(&mut app, Response::Load(Tab::Status, Ok(fresh)));
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file052");
+        assert_eq!(app.selected, 133);
+        assert_eq!(app.filter, "file");
+        assert_eq!(app.list_states[0].offset(), 52);
+        assert_eq!(app.list_states[1].offset(), 43);
+        let selected = app.selected;
+        app.switch_tab(Tab::Status);
+        assert_eq!(app.selected, selected);
+        assert!(!app.view.items.is_empty());
+    }
+    #[test]
+    fn missing_status_selection_falls_back_inside_the_same_pane() {
+        let mut app = App::for_view(Config::default(), status_view(20, 20));
+        app.selected = 30;
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        let mut fresh = status_view(120, 20);
+        fresh
+            .items
+            .retain(|item| item.key() != "//depot/offline_file010");
+        reply(&mut app, Response::Load(Tab::Status, Ok(fresh)));
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file011");
+    }
+    #[test]
+    fn failed_status_reload_retains_the_bookmark_for_retry() {
+        let mut app = App::for_view(Config::default(), status_view(20, 20));
+        app.selected = 30;
+        *app.list_states[1].offset_mut() = 6;
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        reply(
+            &mut app,
+            Response::Load(Tab::Status, Err(anyhow::anyhow!("Temporary failure"))),
+        );
+        assert!(app.status_restore_pending);
+        app.popup = None;
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        reply(
+            &mut app,
+            Response::Load(Tab::Status, Ok(status_view(20, 20))),
+        );
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file010");
+        assert_eq!(app.list_states[1].offset(), 6);
+    }
+    #[test]
+    fn changed_filter_during_reload_takes_precedence_over_status_bookmark() {
+        let mut app = App::for_view(Config::default(), status_view(20, 20));
+        app.filter = "file".into();
+        app.selected = 30;
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        app.filter = "opened".into();
+        // Preserve this newly typed filter over another pending tab round trip.
+        app.switch_tab(Tab::Labels);
+        app.switch_tab(Tab::Status);
+        reply(
+            &mut app,
+            Response::Load(Tab::Status, Ok(status_view(20, 20))),
+        );
+        assert_eq!(app.filter, "opened");
+        assert_eq!(app.current().unwrap().key(), "//depot/opened_file000");
+        assert_eq!(app.list_states[0].offset(), 0);
+    }
+    #[test]
+    fn status_bookmark_is_invalidated_by_workspace_changes() {
+        let mut app = App::for_view(Config::default(), status_view(20, 20));
+        app.selected = 30;
+        app.filter = "file".into();
+        app.target = "123".into();
+        app.switch_tab(Tab::Labels);
+        let mut fresh = status_view(20, 20);
+        fresh.info.client = "other".into();
+        // Other tabs may already have observed the new workspace.
+        app.view.info = fresh.info.clone();
+        app.switch_tab(Tab::Status);
+        reply(&mut app, Response::Load(Tab::Status, Ok(fresh)));
+        assert_eq!(app.selected, 0);
+        assert!(app.filter.is_empty());
+        assert_eq!(app.target, "default");
+        assert_eq!(app.list_states[1].offset(), 0);
+    }
+    #[test]
+    fn first_status_load_keeps_a_target_selected_in_another_tab() {
+        let mut app = App::for_view(Config::default(), View::default());
+        app.switch_tab(Tab::Changes);
+        app.view.info = status_view(0, 0).info;
+        app.target = "123".into();
+        app.switch_tab(Tab::Status);
+        reply(&mut app, Response::Load(Tab::Status, Ok(status_view(2, 2))));
+        assert_eq!(app.target, "123");
+    }
+    #[test]
+    fn only_successful_workspace_or_stream_switches_invalidate_status_navigation() {
+        for action in [
+            Action::SwitchWorkspace("other".into()),
+            Action::SwitchStream("//streams/dev".into()),
+        ] {
+            for success in [true, false] {
+                let mut app = App::for_view(Config::default(), status_view(20, 20));
+                app.selected = 30;
+                app.target = "123".into();
+                app.switch_tab(Tab::Workspaces);
+                reply(
+                    &mut app,
+                    Response::Act(
+                        action.clone(),
+                        if success {
+                            Ok("Switched".into())
+                        } else {
+                            Err(anyhow::anyhow!("Switch failed"))
+                        },
+                    ),
+                );
+                assert_eq!(app.status_state.is_none(), success);
+                assert_eq!(app.target, if success { "default" } else { "123" });
+            }
+        }
     }
     #[test]
     fn destructive_actions_require_explicit_yes() {

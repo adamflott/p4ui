@@ -22,6 +22,7 @@
 - Scoped shelf pagination, including new/deleted shelves while browsing.
 - Optional scan-budget clamping, server-limit inheritance, upper-bound cursors, non-retrying resource failures and retained fatal permission errors.
 - Viewport-sized initial loads, keyboard/wheel paging, resize fills, selection/drilldown preservation, metadata reuse, idle stability and paused paging after failures.
+- Status tab round trips restore selected-file identity, filtering, and both rendered pane viewports after a fresh load, including inserted/removed files, failed reloads, quick switches, and workspace invalidation.
 - Cancelling a slow Status read on a tab switch without cancelling an active mutation.
 - Counting live P4 children to verify the shared concurrency cap, CLI limits, parallel read overlap, cancellation while waiting for a slot, and slot release/reaping after spawn failures or timeouts.
 - CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.

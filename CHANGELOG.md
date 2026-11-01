@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Status restores its selected file, filter, and both pane viewports after tab switches and fresh reloads; workspace changes reset the bookmark.
 - Help explains file action badges, depot history versus workspace changes, and navigation between Status panes.
 ## 0.3.0 — 2026-11-01
 
