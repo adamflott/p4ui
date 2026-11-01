@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Long input paragraphs scroll by their rendered lines, keeping the cursor visible after wrapping and resizing.
 - Returning from changelist files restores the parent list's filter, selected change, viewport and history cursor.
 - Lists retain their viewport while navigating, including independent offsets for the two Status panes.
 - Depot previews check only the selected revision's size, avoiding historical scans and false size-limit errors.

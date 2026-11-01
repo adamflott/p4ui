@@ -485,20 +485,16 @@ fn draw_popup(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
     let scroll = if matches!(popup, Popup::Input { .. }) {
-        text.lines()
-            .count()
+        paragraph
+            .line_count(chunks[0].width)
             .saturating_sub(chunks[0].height as usize)
             .min(u16::MAX as usize) as u16
     } else {
         app.popup_scroll
     };
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        chunks[0],
-    );
+    frame.render_widget(paragraph.scroll((scroll, 0)), chunks[0]);
     frame.render_widget(
         Paragraph::new(footer)
             .style(Style::default().fg(p.accent))
@@ -663,6 +659,34 @@ mod tests {
         assert!(text.starts_with("Workspace warnings"));
         assert!(text.contains("Skipped an unsupported filename"));
         assert!(text.contains("results may be incomplete"));
+    }
+    #[test]
+    fn wrapped_input_keeps_the_cursor_visible_after_resize() {
+        for value in [
+            "X".repeat(400),
+            "wrapped words ".repeat(200),
+            "日本語 💥 ".repeat(200),
+            "line\n".repeat(100),
+        ] {
+            let mut app = App::for_view(Config::default(), View::default());
+            app.popup = Some(Popup::Input {
+                kind: crate::app::InputKind::NewChange,
+                value,
+            });
+            for (width, height) in [(60, 14), (100, 30), (60, 14)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
+                assert!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .any(|cell| cell.symbol() == "▏"),
+                    "Input cursor hidden at {width}x{height}"
+                );
+            }
+        }
     }
     #[test]
     fn control_sequences_are_not_rendered() {
