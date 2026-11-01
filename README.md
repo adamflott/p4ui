@@ -43,7 +43,7 @@ For the server address, p4ui uses `--port` / `-p` first, then a nonempty `P4PORT
 
 `--max-p4-processes N` limits concurrent P4 commands per p4ui instance. The default is **4**; use **1** for serial requests or **2** to reduce concurrency. Independent read-only requests run in parallel, including Status queries and the initial history/connection lookup. Mutations remain serialized, and older history pages follow their cursor order.
 
-Run from the workspace root to operate on the whole workspace. Status, history, files, sync, reconcile, merge, and copy use the current directory and its descendants. **Submit and shelve operate on the entire changelist**, including files outside that directory. Enter on a pending changelist shows its complete file list.
+Run from the workspace root to operate on the whole workspace. Status, history, Files, and bulk sync/reconcile/merge/copy use the current directory and its descendants. **Submit and shelve operate on the entire changelist**, including files outside that directory. Enter on a pending changelist shows its complete file list across the workspace. Selected-file actions apply to that file, even outside the current directory.
 
 Selecting a workspace keeps the current server, user, and character set for the session. A `P4CONFIG` file in the selected workspace cannot redirect that connection. To connect to a different server or user, start another p4ui instance with the desired settings.
 
