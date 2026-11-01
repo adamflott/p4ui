@@ -743,7 +743,9 @@ impl Connection {
     }
     fn preview_depot(&self, path: &str) -> Result<String> {
         // -o keeps binary data out of JSON and avoids printing arbitrary bytes to the terminal.
-        let sizes = self.records(&["sizes", "-a", path])?;
+        // Match print's single selected revision, rather than enumerating every
+        // ancestor and rejecting a small file because an older revision is large.
+        let sizes = self.records(&["sizes", path])?;
         for r in &sizes {
             let size = field(r, "fileSize").parse::<u64>().unwrap_or(0);
             ensure!(

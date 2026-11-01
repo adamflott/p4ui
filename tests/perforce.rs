@@ -822,6 +822,41 @@ fn stream_creation_population_merge_and_deletion() -> Result<()> {
 }
 #[test]
 #[ignore = "requires p4 and p4d"]
+fn preview_limits_apply_only_to_the_selected_revision() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.write("hello.txt", &"large old revision\n".repeat(3000))?;
+    f.connection
+        .act(Action::Reconcile(None, "default".into()))?;
+    f.connection
+        .act(Action::Submit("default".into(), "Large revision".into()))?;
+    let Item::File(file) = f.connection.load(Tab::Files, 200)?.items.remove(0) else {
+        anyhow::bail!("Expected depot file")
+    };
+    f.connection
+        .act(Action::Edit(file.clone(), "default".into()))?;
+    f.write("hello.txt", "small current revision\n")?;
+    f.connection
+        .act(Action::Submit("default".into(), "Small revision".into()))?;
+    f.connection.max_output = 2048;
+    ensure!(
+        f.connection
+            .detail(Detail::Item(Item::File(file.clone()), Tab::Files))?
+            .contains("small current revision")
+    );
+    ensure!(
+        f.connection
+            .detail(Detail::Revision(file.clone(), "2".into()))?
+            .contains("small current revision")
+    );
+    ensure!(
+        f.connection
+            .detail(Detail::Revision(file, "1".into()))
+            .is_err()
+    );
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
 fn shelved_add_preview_and_large_file_limits() -> Result<()> {
     let mut f = Fixture::new()?;
     f.write("new.txt", &"new shelved content\n".repeat(300))?;

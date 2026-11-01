@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Depot previews check only the selected revision's size, avoiding historical scans and false size-limit errors.
 - Successful submission or deletion of the active changelist resets the target to default; failed commands preserve it.
 - Opening a file for deletion uses the active changelist and shows it in the confirmation.
 - Workspace selection preserves the current server endpoint, user, and character set instead of adopting connection settings from the destination's `P4CONFIG` file.
