@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-01
+
 - `./scripts/release.py VERSION` prepares version metadata, validates clean/current repository state, runs local and GitHub checks, verifies draft packages, and publishes only after all checks pass; `--check` and `--resume` support validation and recovery.
 - Native packages preserve the documentation tree, screenshots and linked recipes for usable relative links.
 - Contextual hints and help show effective remapped keys, including swapped bindings and fixed Space aliases.

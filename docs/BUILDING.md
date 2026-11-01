@@ -105,7 +105,7 @@ Archive assembly requires Git, Cargo, Python **3.11+**, tar and network access t
 
 ```sh
 ./scripts/vendor-source.sh
-# dist/p4ui-0.2.0.tar.gz
+# dist/p4ui-0.3.0.tar.gz
 ```
 
 For a machine with a separate Python 3.11 executable:
@@ -130,11 +130,11 @@ With an archive assembled as above:
 
 ```sh
 mkdir -p dist/deb-build
-tar -xzf dist/p4ui-0.2.0.tar.gz -C dist/deb-build
-cd dist/deb-build/p4ui-0.2.0
+tar -xzf dist/p4ui-0.3.0.tar.gz -C dist/deb-build
+cd dist/deb-build/p4ui-0.3.0
 dpkg-buildpackage -us -uc -b
 # Install the .deb from the parent directory:
-sudo apt install ../p4ui_0.2.0-1_*.deb
+sudo apt install ../p4ui_0.3.0-1_*.deb
 ```
 
 `debian/control` declares Cargo/Rust >= 1.88. If those are installed through **rustup** rather than APT, dpkg cannot see them. After installing all the other Build-Depends above and checking the toolchain version, use `dpkg-buildpackage -d -us -uc -b`; `-d` disables package-database build-dependency checks, not tests or Cargo's offline lockfile checks. Do not use `-d` as a substitute for installing missing tools. The build's runtime library dependencies are populated by debhelper.
@@ -157,14 +157,14 @@ If the distro Rust is too old, select a newer supported toolchain before buildin
 
 ```sh
 mkdir -p dist/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-cp dist/p4ui-0.2.0.tar.gz dist/rpmbuild/SOURCES/
+cp dist/p4ui-0.3.0.tar.gz dist/rpmbuild/SOURCES/
 cp packaging/rpm/p4ui.spec dist/rpmbuild/SPECS/
 rpmbuild -ba --define "_topdir $PWD/dist/rpmbuild" dist/rpmbuild/SPECS/p4ui.spec
 
 # Fedora / RHEL install:
-sudo dnf install dist/rpmbuild/RPMS/*/p4ui-0.2.0-1*.rpm
+sudo dnf install dist/rpmbuild/RPMS/*/p4ui-0.3.0-1*.rpm
 # openSUSE alternative:
-# sudo zypper install dist/rpmbuild/RPMS/*/p4ui-0.2.0-1*.rpm
+# sudo zypper install dist/rpmbuild/RPMS/*/p4ui-0.3.0-1*.rpm
 ```
 
 `-ba` creates both a binary RPM and a source RPM. Neither is uploaded or signed automatically. Rust dependencies remain vendored for this upstream recipe; downstream Fedora/openSUSE maintainers may need to adapt it to their crate and license policies.
@@ -173,7 +173,7 @@ sudo dnf install dist/rpmbuild/RPMS/*/p4ui-0.2.0-1*.rpm
 
 ```sh
 sudo pacman -S --needed base-devel rust git python
-python3 scripts/prepare-arch.py dist/p4ui-0.2.0.tar.gz packaging/arch/build
+python3 scripts/prepare-arch.py dist/p4ui-0.3.0.tar.gz packaging/arch/build
 cd packaging/arch/build
 makepkg -si
 ```

@@ -1,3 +1,9 @@
+p4ui (0.3.0-1) unstable; urgency=medium
+
+  * Release 0.3.0. See CHANGELOG.md for the complete release notes.
+
+ -- Adam Flott <adam@adamflott.com>  Sun, 01 Nov 2026 18:02:09 +0000
+
 p4ui (0.2.0-1) unstable; urgency=medium
 
   * Load viewport-sized history pages and fetch older changes while scrolling.

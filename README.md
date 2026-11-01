@@ -54,7 +54,7 @@ See [Building on macOS and Linux](docs/BUILDING.md) for Apple Silicon/Intel Mac 
 Maintainers can prepare and publish a new stable version with one command:
 
 ```sh
-./scripts/release.py 0.2.1
+./scripts/release.py 0.3.1
 ```
 
 Run from a clean, synchronized default branch after pushing source changes. The command updates version metadata and release notes, runs local and GitHub checks, verifies package checksums, and publishes only after all checks pass. See [Releasing](docs/RELEASING.md) for prerequisites, `--check`, and `--resume`.
