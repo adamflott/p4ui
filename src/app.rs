@@ -823,7 +823,7 @@ impl App {
                     } else if bound("move_change") {
                         self.input(InputKind::Reopen(f), self.target.clone());
                     } else if bound("delete") {
-                        self.confirm(Action::Delete(f.clone()),format!("Open {} for DELETE? This removes the local file; the depot deletion happens on submit.",f.depot));
+                        self.confirm(Action::Delete(f.clone(), self.target.clone()),format!("Open {} for DELETE in changelist {}? This removes the local file; the depot deletion happens on submit.",f.depot, self.target));
                     } else if bound("rename") {
                         self.input(InputKind::Move(f), String::new());
                     } else if bound("resolve") {
@@ -1055,6 +1055,13 @@ mod tests {
         assert!(matches!(app.popup, Some(Popup::Confirm { .. })));
         app.key(key('n')).unwrap();
         assert!(app.popup.is_none());
+        app.target = "123".into();
+        app.key(key('D')).unwrap();
+        assert!(
+            matches!(app.popup, Some(Popup::Confirm { ref action, ref text })
+            if matches!(action, Action::Delete(_, change) if change == "123")
+                && text.contains("changelist 123"))
+        );
     }
     fn history_view(id: &str, next: Option<HistoryCursor>) -> View {
         View {

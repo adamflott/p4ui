@@ -780,7 +780,10 @@ impl Connection {
                 validate_change(&change, true)?;
                 self.mutation(&["edit", "-c", &change, &f.depot])
             }
-            Action::Delete(f) => self.mutation(&["delete", &f.depot]),
+            Action::Delete(f, change) => {
+                validate_change(&change, true)?;
+                self.mutation(&["delete", "-c", &change, &f.depot])
+            }
             Action::Revert(f, keep) => {
                 ensure!(f.opened, "Only opened files can be reverted");
                 if keep {

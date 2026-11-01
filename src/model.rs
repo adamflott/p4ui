@@ -180,7 +180,7 @@ pub enum Detail {
 pub enum Action {
     Reconcile(Option<FileEntry>, String),
     Edit(FileEntry, String),
-    Delete(FileEntry),
+    Delete(FileEntry, String),
     Revert(FileEntry, bool),
     Reopen(FileEntry, String),
     NewChange(String),

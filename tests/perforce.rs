@@ -270,7 +270,7 @@ fn offline_changes_keep_content_revert_and_delete() -> Result<()> {
         Item::File(f) => f,
         _ => unreachable!(),
     };
-    f.connection.act(Action::Delete(file))?;
+    f.connection.act(Action::Delete(file, "default".into()))?;
     ensure!(!f.path("hello.txt").exists());
     let deleted = f.file("hello.txt")?;
     ensure!(
@@ -287,6 +287,25 @@ fn offline_changes_keep_content_revert_and_delete() -> Result<()> {
     f.connection
         .act(Action::Submit("default".into(), "Remove file".into()))?;
     ensure!(f.connection.load(Tab::Files, 200)?.items.is_empty());
+    Ok(())
+}
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn delete_uses_the_selected_numbered_changelist() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.seed()?;
+    let id = f.change("Delete in selected changelist")?;
+    let Item::File(file) = f.connection.load(Tab::Files, 200)?.items.remove(0) else {
+        anyhow::bail!("Expected depot file")
+    };
+    f.connection.act(Action::Delete(file, id.clone()))?;
+    let deleted = f.file("hello.txt")?;
+    ensure!(deleted.action == "delete" && deleted.change == id);
+    ensure!(
+        f.connection
+            .records(&["opened", "-c", "default"])?
+            .is_empty()
+    );
     Ok(())
 }
 #[test]
@@ -1035,7 +1054,7 @@ fn history_includes_deleted_file_heads_and_stops_at_scope_origin() -> Result<()>
     let Item::File(file) = f.connection.load(Tab::Files, 200)?.items.remove(0) else {
         anyhow::bail!("Expected file");
     };
-    f.connection.act(Action::Delete(file))?;
+    f.connection.act(Action::Delete(file, "default".into()))?;
     f.connection
         .act(Action::Submit("default".into(), "Delete last file".into()))?;
     f.connection

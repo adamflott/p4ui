@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Opening a file for deletion uses the active changelist and shows it in the confirmation.
 - Workspace selection preserves the current server endpoint, user, and character set instead of adopting connection settings from the destination's `P4CONFIG` file.
 - `--max-p4-processes N` caps concurrent P4 processes per instance (default 4; use 1 for serial requests). Independent Status and initial history reads run in parallel; mutations remain serialized.
 - Cancelled background reads are discarded after rapid tab switches, and child processes are reaped before their concurrency slots are released.
