@@ -18,7 +18,7 @@ The goal is a familiar daily SCM workflow with honest Perforce semantics. This t
 | Conflicts | Resolve queue and automatic/safe/yours/theirs resolve | Interactive three-way conflict editing remains external |
 | Keyboard/help/theme | Arrow and Vim navigation, contextual hints/help, character overrides, three themes | Not compatible with gitui RON configs; no arbitrary theme palette file |
 | Async SCM | Dedicated worker, lazy detail requests, bounded output, timeouts and read cancellation | Single serialized worker; a long operation delays other backend requests |
-| Workspace selection | Session-only local workspace selection, root change | Workspace creation and view editing remain in CLI |
+| Workspace selection | Session-only local workspace selection, root change; full current client-spec editing through the configured editor | Workspace creation remains in CLI; editing a spec does not sync files or change the working directory |
 | Submodules, signed commits | No direct mapping | Perforce views/import paths and server permissions/triggers supply different capabilities |
 
 ## Release scope and validation gaps

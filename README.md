@@ -81,6 +81,8 @@ On Status, **Opened** and **Offline / untracked** share one selection list. Use 
 
 File badges show Perforce actions: `A` is add/branch/move destination, `M` is edit/modify (and the fallback for other actions), and `D` is delete/move source. For unopened files, Files shows the last submitted revision's action, so these badges can describe depot history. Status shows pending workspace changes.
 
+Press `C` on any tab to edit the **current workspace's client specification** in your configured editor (`P4EDITOR`, `VISUAL`, `EDITOR`, then `vi`/`notepad`). Save and exit the editor, then press `y` to save the specification to Perforce, or `n`/Esc to discard it. An unchanged form is not saved. The `Client:` name must stay unchanged. Editing the spec does not sync files or change p4ui's working directory. If the editor or save fails, the error shows a recovery draft path.
+
 | Tab | Commands |
 | --- | --- |
 | Status | `a` / Space reconcile or reopen to target; `A` reconcile all; `o` editor; `m` move to changelist; `u` metadata revert, keep content; `U` discard/revert |
@@ -90,7 +92,7 @@ File badges show Perforce actions: `A` is add/branch/move destination, `M` is ed
 | Files | `e` open for edit; `o` editor; `b` annotate; `h` history; `v` inspect revision; `D` open for delete; `M` move; `L` lock / `l` unlock |
 | Streams | `o` / Space switch; `n` create; `D` delete spec; `g` merge from selected; `p` copy from selected |
 | Resolve | `R` resolve (`-am`, `-as`, `-ay`, `-at`) |
-| Workspaces | `o` / Space select local workspace for this session |
+| Workspaces | `o` / Space select local workspace for this session; `C` edit current client spec (available on every tab) |
 | Labels | Inspect label specifications and filter the list |
 
 `U`, delete, sync, submit, unshelve, integration, and switching require confirmation. Enter never accepts a destructive confirmation: press `y` explicitly.
@@ -115,7 +117,7 @@ quit = "Q"
 # Single characters; arrow/navigation keys remain available.
 ```
 
-Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
+Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`, `edit_client`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
 
 ## History on large depots
 

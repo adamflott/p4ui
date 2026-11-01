@@ -190,15 +190,12 @@ fn run() -> Result<()> {
         if shutdown.load(Ordering::Relaxed) && !app.mutating {
             break;
         }
-        if let Some(path) = app.external_edit.take() {
+        if let Some(edit) = app.external_edit.take() {
             drop(guard);
-            let result = run_editor(&path);
+            let result = run_editor(edit.path());
             guard = TerminalGuard::enter()?;
             terminal.clear()?;
-            if let Err(error) = result {
-                app.editor_error(format!("{error:#}"));
-            }
-            app.refresh();
+            app.editor_finished(edit, result);
         }
         terminal.draw(|f| ui::draw(f, &mut app))?;
         if event::poll(Duration::from_millis(50))? {

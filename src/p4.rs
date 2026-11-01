@@ -239,7 +239,7 @@ impl Connection {
         // a broker/proxy and does not retain SSL or rsh transport information.
         let settings = self
             .text(&["set", "-q", "P4PORT", "P4CHARSET"])
-            .context("Resolving connection settings before switching workspaces")?;
+            .context("Resolving Perforce connection settings")?;
         let setting = |name| {
             settings
                 .lines()
@@ -266,6 +266,22 @@ impl Connection {
             self.user = Some(user);
         }
         Ok(())
+    }
+    /// Read the active workspace's full editable form, preserving its endpoint
+    /// and identity even if P4CONFIG is changed while the editor is open.
+    pub fn client_spec(&mut self) -> Result<(String, String)> {
+        let mut pinned = self.clone();
+        pinned.pin_identity()?;
+        let info = pinned.info()?;
+        let form = pinned.text(&["client", "-o", &info.client])?;
+        validate_client_form(&info.client, &form)?;
+        ensure!(
+            form.lines().any(|line| line.starts_with("Update:")),
+            "The workspace no longer exists; refusing to edit a new client template"
+        );
+        pinned.client = Some(info.client.clone());
+        *self = pinned;
+        Ok((info.client, form))
     }
     pub fn load(&self, tab: Tab, limit: usize) -> Result<View> {
         if matches!(tab, Tab::Status | Tab::Resolve) {
@@ -861,6 +877,14 @@ impl Connection {
                 self.mutation(&["shelve", "-d", "-c", &id])
             }
             Action::Sync => self.mutation(&["sync", "..."]),
+            Action::SaveClientSpec { name, form } => {
+                validate_client_form(&name, &form)?;
+                ensure!(
+                    self.info()?.client == name,
+                    "The active workspace changed while editing; reopen its client specification"
+                );
+                self.execute(&["client", "-i"], Some(&form), false)
+            }
             Action::SwitchStream(path) => {
                 validate_stream(&path)?;
                 // Never use p4 switch's implicit shelve/revert. Refuse dirty workspaces.
@@ -1112,6 +1136,29 @@ fn parse_listing_records(text: &str, warnings: &mut Vec<String>) -> Result<Vec<V
     }
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     Ok(records)
+}
+fn validate_client_form(name: &str, form: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_control),
+        "Invalid workspace name"
+    );
+    let clients: Vec<_> = form
+        .lines()
+        .filter(|line| !line.starts_with(char::is_whitespace))
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(key, _)| key.trim_end().eq_ignore_ascii_case("Client"))
+        .map(|(_, value)| value)
+        .map(str::trim)
+        .collect();
+    ensure!(
+        clients == [name],
+        "Keep exactly one Client: field with the original workspace name ({name}); renaming a workspace is not supported"
+    );
+    ensure!(
+        !form.contains('\0'),
+        "Client specification contains a NUL byte"
+    );
+    Ok(())
 }
 fn validate_stream(path: &str) -> Result<()> {
     ensure!(

@@ -11,8 +11,10 @@ import pty
 import selectors
 import shutil
 import signal
+import shlex
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -29,9 +31,13 @@ def main():
         assert daemon, "p4d must be installed"
         port = f"rsh:{daemon} -r {server} -L {server}/log -i"
         env = {k: v for k, v in os.environ.items() if not k.startswith("P4")}
+        editor = root / "editor.py"
+        editor.write_text("import pathlib,sys\np=pathlib.Path(sys.argv[1])\n"
+                          "if p.suffix=='.p4s': p.write_text(p.read_text().replace('initial spec', 'edited through p4ui'))\n")
         env.update(P4CONFIG=".p4ui-no-config", P4ENVIRO=str(root / "env"),
                    P4TICKETS=str(root / "tickets"), P4TRUST=str(root / "trust"),
-                   TERM="xterm-256color", P4EDITOR="true", VISUAL="true", EDITOR="true")
+                   TERM="xterm-256color", P4EDITOR=shlex.join([sys.executable, str(editor)]),
+                   VISUAL="true", EDITOR="true")
         args = ["-p", port, "-u", "tester", "-c", "test", "-d", str(ws)]
 
         def p4(*cmd, form=None):
@@ -42,7 +48,7 @@ def main():
         for setting in ("security=0", "dm.user.noautocreate=0",
                         "dm.user.setinitialpasswd=1", "dm.user.hideinvalid=0"):
             subprocess.run([daemon, "-r", str(server), f"-cset {setting}"], check=True)
-        p4("client", "-i", form=f"Client: test\nOwner: tester\nRoot: {ws}\nView:\n\t//depot/... //test/...\n")
+        p4("client", "-i", form=f"Client: test\nOwner: tester\nDescription:\n\tinitial spec\nRoot: {ws}\nView:\n\t//depot/... //test/...\n")
         (ws / "hello.txt").write_text("hello from a real terminal\n")
         config = root / "config.toml"
         config.write_text("refresh_seconds = 0\n")
@@ -78,12 +84,21 @@ def main():
             pump(1)
             assert b"Offline / untracked" in captured, captured[-1000:]
             assert b"hello.txt" in captured, captured[-1000:]
+            # Edit the current client spec using the real terminal/editor path.
+            result = send(b"C", 0.8)
+            assert b"\x1b[?1049l" in result and b"\x1b[?1049h" in result
+            assert b"Save the edited client specification for test" in result, result[-2000:]
+            assert "initial spec" in p4("client", "-o", "test"), "Saved before confirmation"
+            result = send(b"y", 0.8)
+            assert b"Command result" in result, result[-1000:]
+            assert "edited through p4ui" in p4("client", "-o", "test")
+            send(b"\r")
             # Reconcile all, accept confirmation, dismiss result.
             send(b"A")
             result = send(b"y", 0.8)
             assert b"Command result" in result, result[-1000:]
             send(b"\r")
-            # Open configured editor. It runs `true` and must restore the TUI.
+            # Open configured editor on a file and restore the TUI.
             result = send(b"o", 0.8)
             assert b"\x1b[?1049l" in result and b"\x1b[?1049h" in result
             send(b"c")
@@ -117,7 +132,7 @@ def main():
             process.wait(timeout=5)
             assert process.returncode == 0
             assert termios.tcgetattr(slave) == before, "SIGTERM did not restore terminal settings"
-            print("PTY workflow passed: reconcile → editor → submit → history/help → quit; terminal restored")
+            print("PTY workflow passed: client spec → reconcile → editor → submit → history/help → quit; terminal restored")
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)

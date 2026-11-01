@@ -193,6 +193,7 @@ pub enum Action {
     Sync,
     SwitchStream(String),
     SwitchWorkspace(String),
+    SaveClientSpec { name: String, form: String },
     Resolve(FileEntry, String),
     Move(FileEntry, String),
     Lock(FileEntry, bool),

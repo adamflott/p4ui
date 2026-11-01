@@ -14,6 +14,77 @@ struct Fixture {
     _dir: TempDir,
     connection: Connection,
 }
+
+#[test]
+#[ignore = "requires p4 and p4d"]
+fn client_spec_edit_preserves_fields_and_rejects_identity_changes() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.write("untouched.txt", "workspace content\n")?;
+    let directory = f.connection.directory.clone();
+    let (name, form) = f.connection.client_spec()?;
+    assert_eq!(name, "test");
+    assert!(form.contains("View:") && form.contains("//depot/... //test/..."));
+    // A description edit must preserve the rest of the complete client form.
+    let edited = format!("{form}\nDescription:\n\tEdited through p4ui\n");
+    // Replace the existing description field, preserving all other fields.
+    let mut in_description = false;
+    let mut lines = Vec::new();
+    for line in edited.lines() {
+        if line.starts_with("Description:") {
+            in_description = true;
+        } else if in_description && !line.is_empty() && !line.starts_with(char::is_whitespace) {
+            in_description = false;
+        }
+        if !in_description {
+            lines.push(line);
+        }
+    }
+    let edited = format!(
+        "{}\nDescription:\n\tEdited through p4ui\n",
+        lines.join("\n")
+    );
+    f.connection.act(Action::SaveClientSpec {
+        name: name.clone(),
+        form: edited.clone(),
+    })?;
+    let saved = f.connection.records(&["client", "-o", &name])?;
+    let spec = saved.first().context("Missing saved client")?;
+    assert_eq!(field(spec, "Description").trim(), "Edited through p4ui");
+    assert_eq!(field(spec, "View0"), "//depot/... //test/...");
+    assert_eq!(field(spec, "Root"), directory.to_string_lossy());
+    assert_eq!(f.connection.directory, directory);
+    assert_eq!(
+        std::fs::read_to_string(f.path("untouched.txt"))?,
+        "workspace content\n"
+    );
+    for invalid in [
+        edited.replace("Client:\ttest", "Client:\tother"),
+        format!("{edited}\nClient: other\n"),
+        format!("{edited}\nClient : other\n"),
+        format!("{edited}\nclient: other\n"),
+        "Description:\n\tMissing Client field\n".into(),
+    ] {
+        assert!(
+            f.connection
+                .act(Action::SaveClientSpec {
+                    name: name.clone(),
+                    form: invalid
+                })
+                .is_err()
+        );
+    }
+    assert!(
+        f.connection
+            .act(Action::SaveClientSpec {
+                name,
+                form: "Client: test\nRoot:\n".into(),
+            })
+            .is_err()
+    );
+    let clients = f.connection.records(&["clients", "-e", "other"])?;
+    assert!(clients.is_empty());
+    Ok(())
+}
 impl Fixture {
     fn new() -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("p4ui-test-").tempdir()?;

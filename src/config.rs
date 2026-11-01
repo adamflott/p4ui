@@ -98,6 +98,7 @@ impl Config {
             "lock",
             "revision",
             "edit_change",
+            "edit_client",
         ];
         for (action, key) in &config.keys {
             if !actions.contains(&action.as_str()) {
@@ -148,6 +149,7 @@ impl Config {
                 "lock" => 'L',
                 "revision" => 'v',
                 "edit_change" => 'E',
+                "edit_client" => 'C',
                 _ => '\0',
             })
     }

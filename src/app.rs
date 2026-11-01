@@ -2,6 +2,7 @@ use crate::{config::Config, model::*, p4::Connection};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
+    io::{Read, Write},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -59,6 +60,7 @@ enum Request {
     Detail(String, Detail),
     Act(Action),
     Edit(FileEntry, String),
+    ClientSpec,
 }
 enum Response {
     History(Tab, Option<HistoryCursor>, u64, Result<View>),
@@ -67,6 +69,37 @@ enum Response {
     Detail(String, Result<String>),
     Act(Action, Result<String>),
     Edit(Result<std::path::PathBuf>),
+    ClientSpec(Result<ExternalEdit>),
+}
+
+pub enum ExternalEdit {
+    File(std::path::PathBuf),
+    ClientSpec {
+        name: String,
+        original: String,
+        path: tempfile::TempPath,
+    },
+}
+impl ExternalEdit {
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::File(path) => path,
+            Self::ClientSpec { path, .. } => path,
+        }
+    }
+    fn client_spec(name: String, original: String) -> Result<Self> {
+        let mut file = tempfile::Builder::new()
+            .prefix("p4ui-client-")
+            .suffix(".p4s")
+            .tempfile()?;
+        file.write_all(original.as_bytes())?;
+        Ok(Self::ClientSpec {
+            name,
+            original,
+            // Close the file before launching the editor (also on Windows).
+            path: file.into_temp_path(),
+        })
+    }
 }
 struct Worker {
     send: Sender<Request>,
@@ -140,6 +173,10 @@ impl Worker {
                         }
                         Ok(std::path::PathBuf::from(file.local))
                     })()),
+                    Request::ClientSpec => Response::ClientSpec((|| {
+                        let (name, form) = connection.client_spec()?;
+                        ExternalEdit::client_spec(name, form)
+                    })()),
                 };
                 if results.send(result).is_err() {
                     break;
@@ -191,7 +228,8 @@ pub struct App {
     pub busy: bool,
     pub quit: bool,
     pub mutating: bool,
-    pub external_edit: Option<std::path::PathBuf>,
+    pub external_edit: Option<ExternalEdit>,
+    client_draft: Option<tempfile::TempPath>,
     pub target: String,
     pub limit: usize,
     pub drill: Option<String>,
@@ -238,6 +276,7 @@ impl App {
             quit: false,
             mutating: false,
             external_edit: None,
+            client_draft: None,
             target: "default".into(),
             limit,
             drill: None,
@@ -412,12 +451,21 @@ impl App {
                 }
                 Response::Edit(result) => {
                     match result {
-                        Ok(path) => self.external_edit = Some(path),
+                        Ok(path) => self.external_edit = Some(ExternalEdit::File(path)),
                         Err(e) => self.message("Cannot edit file", format!("{e:#}")),
                     }
                     self.refresh_needed = true;
                 }
+                Response::ClientSpec(result) => match result {
+                    Ok(edit) => self.external_edit = Some(edit),
+                    Err(e) => self.message("Cannot edit client specification", format!("{e:#}")),
+                },
                 Response::Act(action, result) => {
+                    let draft = if matches!(&action, Action::SaveClientSpec { .. }) {
+                        self.client_draft.take()
+                    } else {
+                        None
+                    };
                     match result {
                         Ok(text) => {
                             if matches!(
@@ -436,14 +484,22 @@ impl App {
                             self.message("Command result", text);
                             self.status = "Completed; refreshing…".into();
                         }
-                        Err(e) => self.message(
-                            "Command failed — inspect state before retrying",
-                            format!("{e:#}"),
-                        ),
+                        Err(e) => {
+                            let recovery = draft.map(preserve_draft).unwrap_or_default();
+                            self.message(
+                                "Command failed — inspect state before retrying",
+                                format!("{e:#}{recovery}"),
+                            );
+                        }
                     }
                     self.refresh_needed = true;
                 }
             }
+        }
+        // Keep the worker idle while the client form is in an editor or awaiting
+        // confirmation. A background refresh must not consume its save request.
+        if self.external_edit.is_some() || self.client_draft.is_some() {
+            return Ok(());
         }
         if self.config.refresh_seconds > 0
             && !self.tab.is_history()
@@ -922,6 +978,13 @@ impl App {
             self.navigate(-1);
         } else if bound("down") {
             self.navigate(1);
+        } else if bound("edit_client") {
+            if self.busy {
+                self.message("Busy", "Wait for the current Perforce request to finish.");
+            } else {
+                self.status = "Reading current client specification…".into();
+                self.send(Request::ClientSpec)?;
+            }
         } else if bound("sync") {
             self.confirm(Action::Sync,"Sync the current directory and descendants to depot HEAD? Perforce may update local files. Opened files are preserved by normal p4 sync semantics.");
         } else if bound("new_change") {
@@ -1080,7 +1143,11 @@ This may replace target content. Inspect the pending change before submitting.",
         match popup {
             Popup::Confirm { action, text } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.act(action)?,
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {}
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    if matches!(action, Action::SaveClientSpec { .. }) {
+                        self.client_draft = None;
+                    }
+                }
                 _ => self.popup = Some(Popup::Confirm { action, text }),
             },
             Popup::Input { kind, mut value } => {
@@ -1164,6 +1231,47 @@ This may replace target content. Inspect the pending change before submitting.",
     pub fn editor_error(&mut self, error: String) {
         self.message("Editor failed", error);
     }
+    pub fn editor_finished(&mut self, edit: ExternalEdit, result: Result<()>) {
+        match edit {
+            ExternalEdit::File(_) => {
+                if let Err(error) = result {
+                    self.editor_error(format!("{error:#}"));
+                }
+            }
+            ExternalEdit::ClientSpec {
+                name,
+                original,
+                path,
+            } => {
+                let edited = result.and_then(|()| {
+                    let maximum = (self.config.max_output_mb as u64) * 1024 * 1024;
+                    let mut form = String::new();
+                    std::fs::File::open(&path)?
+                        .take(maximum + 1)
+                        .read_to_string(&mut form)?;
+                    anyhow::ensure!(
+                        form.len() as u64 <= maximum,
+                        "Client specification exceeds the output limit"
+                    );
+                    Ok(form)
+                });
+                match edited {
+                    Ok(form) if form == original => {
+                        self.status = "Client specification unchanged; nothing saved.".into();
+                    }
+                    Ok(form) => {
+                        self.client_draft = Some(path);
+                        self.confirm(
+                            Action::SaveClientSpec { name: name.clone(), form },
+                            format!("Save the edited client specification for {name}?\n\nThis updates the workspace specification on the server. Files are not synced. Press n or Esc to discard the draft."),
+                        );
+                    }
+                    Err(error) => self.editor_error(format!("{error:#}{}", preserve_draft(path))),
+                }
+            }
+        }
+        self.refresh_needed = true;
+    }
     pub fn paste(&mut self, text: &str) {
         if let Some(Popup::Input { kind, value }) = &mut self.popup {
             for c in text
@@ -1178,6 +1286,24 @@ This may replace target content. Inspect the pending change before submitting.",
                 }
                 value.push(c);
             }
+        }
+    }
+}
+
+fn preserve_draft(path: tempfile::TempPath) -> String {
+    match path.keep() {
+        Ok(path) => format!(
+            "\n\nYour edited client specification is preserved at {}",
+            path.display()
+        ),
+        Err(mut error) => {
+            let path = error.path.to_path_buf();
+            error.path.disable_cleanup(true);
+            format!(
+                "\n\nCould not persist the draft: {}. Recover it from {}",
+                error.error,
+                path.display()
+            )
         }
     }
 }
@@ -1241,6 +1367,89 @@ mod tests {
         assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
         app.key(key('k')).unwrap();
         assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn client_form_requires_confirmation_and_discard_removes_the_draft() {
+        for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
+            let mut app = App::for_view(Config::default(), View::default());
+            let edit = ExternalEdit::client_spec("test".into(), "Client: test\n".into()).unwrap();
+            let path = edit.path().to_path_buf();
+            std::fs::write(&path, "Client: test\nDescription:\n\tNew description\n").unwrap();
+            app.editor_finished(edit, Ok(()));
+            assert!(
+                matches!(&app.popup, Some(Popup::Confirm { action: Action::SaveClientSpec { name, form }, .. })
+                if name == "test" && form.contains("New description"))
+            );
+            app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert!(matches!(app.popup, Some(Popup::Confirm { .. })));
+            assert!(path.exists());
+            app.key(KeyEvent::new(cancel, KeyModifiers::NONE)).unwrap();
+            assert!(app.popup.is_none());
+            assert!(!path.exists());
+        }
+    }
+    #[test]
+    fn unchanged_client_form_does_not_request_a_save() {
+        let mut app = App::for_view(Config::default(), View::default());
+        let edit = ExternalEdit::client_spec("test".into(), "Client: test\n".into()).unwrap();
+        let path = edit.path().to_path_buf();
+        app.editor_finished(edit, Ok(()));
+        assert!(app.popup.is_none());
+        assert!(app.status.contains("unchanged"));
+        assert!(!path.exists());
+    }
+    #[test]
+    fn client_editor_and_save_failures_preserve_recoverable_drafts() {
+        for editor_failed in [true, false] {
+            let mut app = App::for_view(Config::default(), View::default());
+            let edit = ExternalEdit::client_spec("test".into(), "Client: test\n".into()).unwrap();
+            let path = edit.path().to_path_buf();
+            let edited = "Client: test\nDescription:\n\tImportant edits\n";
+            std::fs::write(&path, edited).unwrap();
+            app.editor_finished(
+                edit,
+                if editor_failed {
+                    Err(anyhow::anyhow!("Editor failed"))
+                } else {
+                    Ok(())
+                },
+            );
+            if !editor_failed {
+                let Some(Popup::Confirm { action, .. }) = app.popup.take() else {
+                    panic!("Expected confirmation");
+                };
+                reply(
+                    &mut app,
+                    Response::Act(action, Err(anyhow::anyhow!("Permission denied"))),
+                );
+            }
+            assert!(
+                matches!(&app.popup, Some(Popup::Message { text, .. }) if text.contains(path.to_string_lossy().as_ref()))
+            );
+            drop(app);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    #[test]
+    fn successful_client_save_removes_the_draft_and_refreshes() {
+        let mut app = App::for_view(Config::default(), View::default());
+        let edit = ExternalEdit::client_spec("test".into(), "Client: test\n".into()).unwrap();
+        let path = edit.path().to_path_buf();
+        std::fs::write(&path, "Client: test\nDescription:\n\tEdited\n").unwrap();
+        app.editor_finished(edit, Ok(()));
+        let Some(Popup::Confirm { action, .. }) = app.popup.take() else {
+            panic!("Expected confirmation");
+        };
+        app.mutating = true;
+        reply(
+            &mut app,
+            Response::Act(action, Ok("Client test saved.".into())),
+        );
+        assert!(!path.exists());
+        assert!(app.client_draft.is_none());
+        assert!(matches!(app.popup, Some(Popup::Message { .. })));
     }
     #[test]
     fn status_roundtrip_preserves_selection_filter_and_each_panes_top_file() {

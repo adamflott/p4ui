@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `C` edits the current workspace's full client specification in the configured editor, with save confirmation and recovery drafts on errors.
 - Status restores its selected file, filter, and both pane viewports after tab switches and fresh reloads; workspace changes reset the bookmark.
 - Help explains file action badges, depot history versus workspace changes, and navigation between Status panes.
 - Brief executable-busy startup errors retry within a bounded, cancellable interval, without retrying any command that has started.
