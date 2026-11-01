@@ -41,8 +41,8 @@ Cargo installs to `~/.cargo/bin` by default; include that directory on PATH. For
    brew install --cask perforce
    p4 -V
    cd /path/to/your/perforce/workspace
-   p4 login                    # if your server requires it
    export P4PORT=ssl:perforce.example.com:1666  # or your server address
+   p4 login                    # if your server requires it
    p4ui --check
    p4ui
    ```
