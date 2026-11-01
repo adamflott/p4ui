@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,25 @@ class PackagingTests(unittest.TestCase):
             result = subprocess.run([*command[:2], str(invalid), str(directory / "invalid")], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((directory / "invalid").exists())
+
+    def test_installed_documentation_retains_relative_link_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination = pathlib.Path(temp) / 'documentation with spaces'
+            subprocess.run(['bash', str(ROOT / 'scripts/install-docs.sh'), str(destination)],
+                           check=True, capture_output=True, cwd=temp)
+            for required in ('README.md', 'CONTRIBUTING.md', 'docs/BUILDING.md',
+                             'docs/TESTING.md', 'docs/PARITY.md', 'docs/RELEASING.md',
+                             'docs/status.svg'):
+                self.assertTrue((destination / required).is_file(), required)
+            checked = 0
+            for document in destination.rglob('*.md'):
+                for target in re.findall(r'\]\(([^)]+)\)', document.read_text()):
+                    if target.startswith(('#', 'http:', 'https:', 'mailto:')):
+                        continue
+                    path = document.parent / target.split('#', 1)[0]
+                    self.assertTrue(path.exists(), f'{document.relative_to(destination)}: {target}')
+                    checked += 1
+            self.assertGreater(checked, 5)
 
     def test_notices_preserve_upstream_license_and_notice(self):
         with tempfile.TemporaryDirectory() as temp:

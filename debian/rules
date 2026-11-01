@@ -15,6 +15,11 @@ endif
 
 override_dh_auto_install:
 	install -Dm755 target/debian/release/p4ui debian/p4ui/usr/bin/p4ui
+	bash scripts/install-docs.sh debian/p4ui/usr/share/doc/p4ui
+
+# Keep relative Markdown/image links usable without extracting individual files.
+override_dh_compress:
+	dh_compress -X.md -X.svg
 
 override_dh_auto_clean:
 	rm -rf target/debian

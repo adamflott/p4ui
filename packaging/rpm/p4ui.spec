@@ -33,12 +33,13 @@ cargo test --frozen
 
 %install
 install -Dm755 target/release/p4ui %{buildroot}%{_bindir}/p4ui
+bash scripts/install-docs.sh %{buildroot}%{_docdir}/%{name}
 
 %files
 %{_bindir}/p4ui
 %license LICENSE
 %license THIRD_PARTY_NOTICES
-%doc README.md CONTRIBUTING.md docs/BUILDING.md docs/RELEASING.md docs/PARITY.md docs/TESTING.md
+%doc %{_docdir}/%{name}
 
 %changelog
 * Sat Oct 31 2026 Adam Flott <adam@adamflott.com> - 0.2.0-1
