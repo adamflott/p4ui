@@ -155,6 +155,13 @@ impl Worker {
     }
 }
 
+struct ParentView {
+    view: View,
+    selected: usize,
+    filter: String,
+    list_states: [ratatui::widgets::ListState; 3],
+}
+
 pub struct App {
     pub config: Config,
     pub tab: Tab,
@@ -177,7 +184,7 @@ pub struct App {
     pub target: String,
     pub limit: usize,
     pub drill: Option<String>,
-    parent: Option<(View, usize)>,
+    parent: Option<ParentView>,
     history_more_requested: bool,
     history_scroll_requested: bool,
     history_paging_blocked: bool,
@@ -597,14 +604,17 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if self.drill.take().is_some() {
-                    if let Some((view, selected)) = self.parent.take() {
-                        self.view = view;
-                        self.selected = selected;
+                    if let Some(parent) = self.parent.take() {
+                        self.view = parent.view;
+                        self.selected = parent.selected;
+                        self.filter = parent.filter;
+                        self.list_states = parent.list_states;
                     }
                     self.refresh_needed = !self.tab.is_history();
+                } else {
+                    self.filter.clear();
                 }
                 self.focus_detail = false;
-                self.filter.clear();
                 self.selection_updated();
             }
             KeyCode::Tab => {
@@ -649,7 +659,12 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(Item::Change { id, .. }) = self.current() {
-                    self.parent = Some((self.view.clone(), self.selected));
+                    self.parent = Some(ParentView {
+                        view: self.view.clone(),
+                        selected: self.selected,
+                        filter: std::mem::take(&mut self.filter),
+                        list_states: std::mem::take(&mut self.list_states),
+                    });
                     self.view.items.clear();
                     self.view.history = None;
                     self.drill = Some(id);
@@ -1182,6 +1197,41 @@ mod tests {
         app.busy = true;
         app.key(key('+')).unwrap();
         assert!(!app.history_more_requested);
+    }
+    #[test]
+    fn drilldown_restores_the_filtered_selection_and_viewport() {
+        for tab in [Tab::Log, Tab::Shelves, Tab::Changes] {
+            let mut view = history_view("100", Some(HistoryCursor::new(59)));
+            view.items = (60..=100)
+                .rev()
+                .map(|id| Item::Change {
+                    id: id.to_string(),
+                    description: if id % 2 == 0 { "matching" } else { "other" }.into(),
+                    user: "user".into(),
+                    client: "client".into(),
+                    status: "submitted".into(),
+                })
+                .collect();
+            let mut app = App::for_view(Config::default(), view);
+            app.tab = tab;
+            app.filter = "matching".into();
+            app.selected = 10;
+            app.list_states[2] = ratatui::widgets::ListState::default()
+                .with_offset(5)
+                .with_selected(Some(10));
+            assert_eq!(app.current().unwrap().key(), "80");
+            app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert!(app.filter.is_empty());
+            assert_eq!(app.list_states[2].offset(), 0);
+            app.view = View::default();
+            app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(app.filter, "matching");
+            assert_eq!(app.current().unwrap().key(), "80");
+            assert_eq!(app.list_states[2].offset(), 5);
+            assert_eq!(app.view.history.unwrap().next, Some(HistoryCursor::new(59)));
+        }
     }
     #[test]
     fn unicode_input_and_search_are_safe() {
