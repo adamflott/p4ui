@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Contextual hints and help show effective remapped keys, including swapped bindings and fixed Space aliases.
 - Release reruns verify existing public assets and their published checksums, and fail for incomplete releases without overwriting released files.
 - Tagged package publication requires the full CI suite to pass for the exact validated source commit.
 - Long input paragraphs scroll by their rendered lines, keeping the cursor visible after wrapping and resizing.

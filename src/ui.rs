@@ -239,61 +239,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         })),
         layout[3],
     );
-    let hint = if app.drill.is_some() {
-        if app.tab == Tab::Changes {
-            "reopen: Space   move CL: m   submit this CL: c   Esc: back"
-        } else {
-            "diff: Enter   annotate: b   history: h   Esc: back"
-        }
-    } else {
-        match app.tab {
-            Tab::Status => {
-                "reconcile: a/Space   all: A   keep: u   revert: U   move CL: m   submit: c"
-            }
-            Tab::Log => "browse files: Enter   search loaded: /   scroll for older   newest: r",
-            Tab::Changes => {
-                "target: Space   new: n   describe: E   shelve: s   submit: c   delete: D"
-            }
-            Tab::Shelves => "unshelve: u/Space   delete shelf: D   files: Enter   older: +",
-            Tab::Files => {
-                "editor: o   open for edit: e   annotate: b   history: h   revision: v   delete: D   rename: M"
-            }
-            Tab::Streams => "switch: o/Space   new: n   delete: D   merge from: g   copy from: p",
-            Tab::Resolve => "resolve: R   diff: Enter   annotate: b   history: h",
-            Tab::Workspaces => "use workspace: o/Space   inspect: Enter",
-            Tab::Labels => "inspect: Enter   search: /",
-        }
-    };
-    // Show remapped keys in contextual hints too.
-    let mut hints = hint.to_string();
-    for (action, default) in [
-        ("reconcile", "a/Space"),
-        ("submit", "c"),
-        ("revert", "U"),
-        ("move_change", "m"),
-        ("new_change", "n"),
-        ("shelve", "s"),
-        ("unshelve", "u/Space"),
-        ("edit_change", "E"),
-        ("delete", "D"),
-        ("edit", "e"),
-        ("annotate", "b"),
-        ("filelog", "h"),
-        ("revision", "v"),
-        ("rename", "M"),
-        ("resolve", "R"),
-        ("open", "o/Space"),
-    ] {
-        if app.config.keys.contains_key(action) {
-            hints = hints.replace(
-                &format!(": {default}"),
-                &format!(": {}", app.config.key(action)),
-            );
-        }
-    }
+    let hints = contextual_hints(app);
     frame.render_widget(
         Paragraph::new(format!(
-            " {hints}\n ↑↓/jk select  ←→ tabs  Tab pane  {} refresh  {} sync  {} help  {} quit",
+            " {hints}\n ↑↓/{}{} select  ←→ tabs  Tab pane  {} refresh  {} sync  {} help  {} quit",
+            app.config.key("up"),
+            app.config.key("down"),
             app.config.key("refresh"),
             app.config.key("sync"),
             app.config.key("help"),
@@ -304,6 +255,78 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     if let Some(popup) = &app.popup {
         draw_popup(frame, app, popup, p);
+    }
+}
+fn contextual_hints(app: &App) -> String {
+    let k = |action| app.config.key(action);
+    if app.drill.is_some() {
+        return if app.tab == Tab::Changes {
+            format!(
+                "reopen: {}/Space   move CL: {}   submit this CL: {}   Esc: back",
+                k("reconcile"),
+                k("move_change"),
+                k("submit")
+            )
+        } else {
+            format!(
+                "diff: Enter   annotate: {}   history: {}   Esc: back",
+                k("annotate"),
+                k("filelog")
+            )
+        };
+    }
+    match app.tab {
+        Tab::Status => format!(
+            "reconcile: {}/Space   all: A   keep: {}   revert: {}   move CL: {}   submit: {}",
+            k("reconcile"),
+            k("unshelve"),
+            k("revert"),
+            k("move_change"),
+            k("submit")
+        ),
+        Tab::Log => format!(
+            "browse files: Enter   search loaded: {}   scroll for older   newest: {}",
+            k("search"),
+            k("refresh")
+        ),
+        Tab::Changes => format!(
+            "target: {}/Space   new: {}   describe: {}   shelve: {}   submit: {}   delete: {}",
+            k("open"),
+            k("new_change"),
+            k("edit_change"),
+            k("shelve"),
+            k("submit"),
+            k("delete")
+        ),
+        Tab::Shelves => format!(
+            "unshelve: {}/Space   delete shelf: {}   files: Enter   older: +",
+            k("unshelve"),
+            k("delete")
+        ),
+        Tab::Files => format!(
+            "editor: {}   open for edit: {}   annotate: {}   history: {}   revision: {}   delete: {}   rename: {}",
+            k("open"),
+            k("edit"),
+            k("annotate"),
+            k("filelog"),
+            k("revision"),
+            k("delete"),
+            k("rename")
+        ),
+        Tab::Streams => format!(
+            "switch: {}/Space   new: {}   delete: {}   merge from: g   copy from: p",
+            k("open"),
+            k("new_change"),
+            k("delete")
+        ),
+        Tab::Resolve => format!(
+            "resolve: {}   diff: Enter   annotate: {}   history: {}",
+            k("resolve"),
+            k("annotate"),
+            k("filelog")
+        ),
+        Tab::Workspaces => format!("use workspace: {}/Space   inspect: Enter", k("open")),
+        Tab::Labels => format!("inspect: Enter   search: {}", k("search")),
     }
 }
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, p: Palette, opened: Option<bool>) {
@@ -505,7 +528,7 @@ fn draw_popup(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
 fn help(app: &App) -> String {
     let k = |action| app.config.key(action);
     let instructions = format!(
-        "p4ui — Perforce in your terminal\n\nNavigation\n  1–9 / ←→: tabs    ↑↓ / {}{}: select    Tab / Enter: diff focus\n  PageUp/PageDown: scroll    Home/End: first/last\n  {}: filter loaded rows    Esc: clear filter / return to list\n  {} / F5: refresh    +: load more    {}: quit    Ctrl-C: exit\n\nStatus and files\n  {} / Space: reconcile selected offline file into active changelist\n  A: reconcile all files in the current directory and descendants\n  {}: open selected depot file for edit; o opens your external editor\n  {}: move opened file to a different changelist\n  u: remove open action, KEEP workspace content (revert -k)\n  {}: REVERT file and discard edits (confirmation required)\n  {}: open file for delete    {}: move/rename opened file\n  {}: annotate/blame    {}: revision/integration log    {}: view revision\n  {}: lock opened file    l: unlock\n\nChangelists\n  Space / {}: set active target changelist\n  {}: new numbered changelist    {}: edit saved description\n  {}: submit active or selected pending changelist\n  {}: delete empty pending changelist\n\nShelves\n  {} (Changes): shelve a numbered changelist; existing shelves are protected\n  {} (Shelves): unshelve into a chosen changelist\n  {} (Shelves): permanently delete shelf (confirmation required)\n  Shelving preserves opened files. Revert separately when ready.\n\nSync, streams, workspaces and resolve\n  {}: sync current directory and descendants to depot HEAD\n  {} / Space (Streams): switch clean workspace and sync\n  {} / Space (Workspaces): choose local workspace for this session\n  {}: resolve selected file (-am merge, -as safe, -ay yours, -at theirs)\n  Streams: n creates a development child of the CURRENT stream (or mainline).\n  D deletes a stream spec. g merges / p copies from the selected stream.\n  Use an external merge tool for conflicts automatic resolve leaves behind.\n\nPerforce semantics\n  All file actions and status are scoped to the launch directory and descendants.\n  Submit/shelve act on the WHOLE selected changelist, even outside this scope.\n  Files are opened as complete files: Perforce has no index or line staging.\n  Authentication uses existing p4 login tickets, P4CONFIG and P4 environment.\n  Never ignore a command error: a submit or sync can partially complete.\n  History fills the visible list; scrolling near the bottom fetches older pages.\n  Log and Shelves do not automatically poll the server.\n  The mouse wheel and PageDown scroll; + also fetches an older page.\n  Change summaries show up to 200 files; Enter opens per-file diffs.\n  Filters search loaded rows only. Other tabs: + raises the result limit.\n  Theme and character bindings: ~/.config/p4ui/config.toml\n\nSee README.md for feature mapping, limitations and server tests.",
+        "p4ui — Perforce in your terminal\n\nNavigation\n  1–9 / ←→: tabs    ↑↓ / {}{}: select    Tab / Enter: diff focus\n  PageUp/PageDown: scroll    Home/End: first/last\n  {}: filter loaded rows    Esc: clear filter / return to list\n  {} / F5: refresh    +: load more    {}: quit    Ctrl-C: exit\n\nStatus and files\n  {} / Space: reconcile selected offline file into active changelist\n  A: reconcile all files in the current directory and descendants\n  {}: open selected depot file for edit; {open} opens your external editor\n  {}: move opened file to a different changelist\n  {unshelve}: remove open action, KEEP workspace content (revert -k)\n  {}: REVERT file and discard edits (confirmation required)\n  {}: open file for delete    {}: move/rename opened file\n  {}: annotate/blame    {}: revision/integration log    {}: view revision\n  {}: lock opened file    l: unlock\n\nChangelists\n  Space / {}: set active target changelist\n  {}: new numbered changelist    {}: edit saved description\n  {}: submit active or selected pending changelist\n  {}: delete empty pending changelist\n\nShelves\n  {} (Changes): shelve a numbered changelist; existing shelves are protected\n  {} (Shelves): unshelve into a chosen changelist\n  {} (Shelves): permanently delete shelf (confirmation required)\n  Shelving preserves opened files. Revert separately when ready.\n\nSync, streams, workspaces and resolve\n  {}: sync current directory and descendants to depot HEAD\n  {} / Space (Streams): switch clean workspace and sync\n  {} / Space (Workspaces): choose local workspace for this session\n  {}: resolve selected file (-am merge, -as safe, -ay yours, -at theirs)\n  Streams: {new_change} creates a development child of the CURRENT stream (or mainline).\n  {delete} deletes a stream spec. g merges / p copies from the selected stream.\n  Use an external merge tool for conflicts automatic resolve leaves behind.\n\nPerforce semantics\n  All file actions and status are scoped to the launch directory and descendants.\n  Submit/shelve act on the WHOLE selected changelist, even outside this scope.\n  Files are opened as complete files: Perforce has no index or line staging.\n  Authentication uses existing p4 login tickets, P4CONFIG and P4 environment.\n  Never ignore a command error: a submit or sync can partially complete.\n  History fills the visible list; scrolling near the bottom fetches older pages.\n  Log and Shelves do not automatically poll the server.\n  The mouse wheel and PageDown scroll; + also fetches an older page.\n  Change summaries show up to 200 files; Enter opens per-file diffs.\n  Filters search loaded rows only. Other tabs: + raises the result limit.\n  Theme and character bindings: ~/.config/p4ui/config.toml\n\nSee README.md for feature mapping, limitations and server tests.",
         k("up"),
         k("down"),
         k("search"),
@@ -532,7 +555,11 @@ fn help(app: &App) -> String {
         k("sync"),
         k("open"),
         k("open"),
-        k("resolve")
+        k("resolve"),
+        open = k("open"),
+        unshelve = k("unshelve"),
+        new_change = k("new_change"),
+        delete = k("delete"),
     );
     if app.view.warnings.is_empty() {
         instructions
@@ -645,6 +672,52 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert_eq!(app.list_states[0].offset(), opened_offset);
         assert_eq!(app.list_states[1].selected(), Some(0));
+    }
+    #[test]
+    fn remapped_keys_are_rendered_without_replacement_collisions() {
+        let mut app = App::for_view(Config::default(), View::default());
+        for (action, key) in [
+            ("submit", "e"),
+            ("edit", "c"),
+            ("open", "u"),
+            ("unshelve", "o"),
+            ("new_change", "D"),
+            ("delete", "n"),
+            ("search", "r"),
+            ("refresh", "/"),
+            ("up", "X"),
+            ("down", "Y"),
+        ] {
+            app.config.keys.insert(action.into(), key.into());
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        for (tab, expected) in [
+            (Tab::Status, vec!["submit: e", "keep: o", "↑↓/XY select"]),
+            (
+                Tab::Files,
+                vec!["editor: u", "open for edit: c", "delete: n"],
+            ),
+            (Tab::Streams, vec!["switch: u/Space", "new: D", "delete: n"]),
+            (Tab::Log, vec!["search loaded: r", "newest: /"]),
+        ] {
+            app.tab = tab;
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            for text in expected {
+                assert!(rendered.contains(text), "Missing {text:?} on {tab:?}");
+            }
+        }
+        let text = help(&app);
+        assert!(text.contains("u opens your external editor"));
+        assert!(text.contains("o: remove open action"));
+        assert!(text.contains("Streams: D creates"));
+        assert!(text.contains("n deletes a stream spec"));
     }
     #[test]
     fn workspace_warnings_are_available_in_help() {
