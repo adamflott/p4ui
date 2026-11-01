@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `t` on Status jumps directly between Opened and Offline / untracked, including from diff focus; filters are honored and the key is remappable.
 - `C` edits the current workspace's full client specification in the configured editor, with save confirmation and recovery drafts on errors.
 - Status restores its selected file, filter, and both pane viewports after tab switches and fresh reloads; workspace changes reset the bookmark.
 - Help explains file action badges, depot history versus workspace changes, and navigation between Status panes.

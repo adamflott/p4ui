@@ -318,6 +318,35 @@ impl App {
         self.detail.clear();
         self.detail_title = "Diff / details".into();
     }
+    fn jump_status_pane(&mut self) {
+        let visible = self.visible();
+        let target_opened = visible
+            .get(self.selected)
+            .is_some_and(|item| matches!(item, Item::File(file) if !file.opened));
+        let destination = visible
+            .iter()
+            .position(|item| matches!(item, Item::File(file) if file.opened == target_opened));
+        self.focus_detail = false;
+        let pane = if target_opened {
+            "Opened"
+        } else {
+            "Offline / untracked"
+        };
+        if let Some(index) = destination {
+            self.selected = index;
+            self.selection_updated();
+            self.status = format!("{pane} · first matching file");
+        } else {
+            self.status = format!(
+                "No {pane} files{}",
+                if self.filter.is_empty() {
+                    " in the loaded Status"
+                } else {
+                    " match the current filter"
+                }
+            );
+        }
+    }
     fn message(&mut self, title: &str, text: impl Into<String>) {
         self.popup_scroll = 0;
         self.popup = Some(Popup::Message {
@@ -978,6 +1007,8 @@ impl App {
             self.navigate(-1);
         } else if bound("down") {
             self.navigate(1);
+        } else if bound("status_pane") && self.tab == Tab::Status {
+            self.jump_status_pane();
         } else if bound("edit_client") {
             if self.busy {
                 self.message("Busy", "Wait for the current Perforce request to finish.");
@@ -1367,6 +1398,56 @@ mod tests {
         assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
         app.key(key('k')).unwrap();
         assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn status_pane_shortcut_jumps_past_large_opened_lists_and_leaves_diff_focus() {
+        let mut app = App::for_view(Config::default(), status_view(10_000, 3));
+        app.selected = 5_000;
+        app.focus_detail = true;
+        app.detail_scroll = (100, 20);
+        app.key(key('t')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
+        assert!(!app.focus_detail);
+        assert_eq!(app.detail_scroll, (0, 0));
+        app.key(key('t')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/opened_file000");
+    }
+    #[test]
+    fn status_pane_shortcut_uses_visible_rows_and_reports_empty_destinations() {
+        let mut app = App::for_view(Config::default(), status_view(80, 80));
+        app.filter = "file07".into();
+        app.key(key('t')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/offline_file070");
+        assert_eq!(app.filter, "file07");
+        app.key(key('t')).unwrap();
+        assert_eq!(app.current().unwrap().key(), "//depot/opened_file070");
+        app.filter = "opened".into();
+        app.selected = 5;
+        app.key(key('t')).unwrap();
+        assert_eq!(app.selected, 5);
+        assert!(
+            app.status
+                .contains("Offline / untracked files match the current filter")
+        );
+        for (opened, offline) in [(0, 0), (4, 0), (0, 4)] {
+            let mut app = App::for_view(Config::default(), status_view(opened, offline));
+            app.key(key('t')).unwrap();
+            assert_eq!(app.selected, 0);
+            assert!(app.status.starts_with("No "));
+        }
+    }
+    #[test]
+    fn status_pane_shortcut_is_remappable_and_scoped_to_status() {
+        let mut config = Config::default();
+        config.keys.insert("status_pane".into(), "w".into());
+        let mut app = App::for_view(config, status_view(4, 4));
+        app.key(key('t')).unwrap();
+        assert_eq!(app.selected, 0);
+        app.key(key('w')).unwrap();
+        assert_eq!(app.selected, 4);
+        app.tab = Tab::Files;
+        app.key(key('w')).unwrap();
+        assert_eq!(app.selected, 4);
     }
     #[test]
     fn client_form_requires_confirmation_and_discard_removes_the_draft() {

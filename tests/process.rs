@@ -427,6 +427,19 @@ else: raise AssertionError('Unexpected command: '+repr(args))
         "//depot/offline_file052"
     );
     assert_eq!(render(&mut app)?, before);
+    app.focus_detail = true;
+    app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))?;
+    assert_eq!(
+        app.current().context("No opened selection")?.key(),
+        "//depot/000_new_file"
+    );
+    assert!(!app.focus_detail);
+    app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))?;
+    assert_eq!(
+        app.current().context("No offline selection")?.key(),
+        "//depot/offline_file000"
+    );
+    assert!(render(&mut app)?.1.contains("offline_file000"));
     Ok(())
 }
 #[test]

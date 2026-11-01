@@ -99,6 +99,7 @@ impl Config {
             "revision",
             "edit_change",
             "edit_client",
+            "status_pane",
         ];
         for (action, key) in &config.keys {
             if !actions.contains(&action.as_str()) {
@@ -150,6 +151,7 @@ impl Config {
                 "revision" => 'v',
                 "edit_change" => 'E',
                 "edit_client" => 'C',
+                "status_pane" => 't',
                 _ => '\0',
             })
     }
@@ -172,14 +174,21 @@ mod tests {
             "[keys]\nquit = 'r'",
             "[keys]\nquit = '1'",
             "[keys]\nquit = 'A'",
+            "[keys]\nquit = 'C'",
+            "[keys]\nquit = 't'",
             "[keys]\nquitt = 'Q'",
         ] {
             std::fs::write(&path, text)?;
             assert!(Config::load(Some(path.clone())).is_err(), "accepted {text}");
         }
-        std::fs::write(&path, "theme = 'light'\n[keys]\nquit = 'r'\nrefresh = 'q'")?;
+        std::fs::write(
+            &path,
+            "theme = 'light'\n[keys]\nquit = 'r'\nrefresh = 'q'\nedit_client = 'V'\nstatus_pane = 'w'",
+        )?;
         let c = Config::load(Some(path))?;
         assert_eq!(c.key("refresh"), 'q');
+        assert_eq!(c.key("edit_client"), 'V');
+        assert_eq!(c.key("status_pane"), 'w');
         Ok(())
     }
 }

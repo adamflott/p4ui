@@ -77,7 +77,7 @@ The result of a failed submit can be a newly numbered pending changelist. Refres
 
 `?` / F1 opens full help, including the keys for the current workflows. Arrow keys and `j`/`k` navigate; left/right or `1`–`9` switch tabs; Tab focuses the diff pane. PageUp/PageDown and Home/End scroll. `/` filters **loaded** rows, scrolling near the bottom loads an older page in Log/Shelves (`+` also loads a page; it increases the result limit in other tabs), `r` / F5 refreshes, and `q` exits. Read-only background requests are cancelled on exit; p4ui waits for active mutations before allowing a normal exit.
 
-On Status, **Opened** and **Offline / untracked** share one selection list. Use Down/`j` past the last Opened file to reach Offline / untracked; Up/`k` crosses back. Tab toggles focus between the file lists and diff. End selects the last file. Returning to Status restores its selected file, filter and pane scroll positions after refreshing; workspace changes reset them.
+On Status, press **`t`** to jump directly between **Opened** and **Offline / untracked**, selecting the first matching file in the destination pane. This works from the diff pane too and respects the active filter; an empty destination keeps the selection and shows a message. You can also use Down/`j` past the last Opened file or Up/`k` across the boundary. Tab toggles focus between the file lists and diff. End selects the last file. Returning to Status restores its selected file, filter and pane scroll positions after refreshing; workspace changes reset them.
 
 File badges show Perforce actions: `A` is add/branch/move destination, `M` is edit/modify (and the fallback for other actions), and `D` is delete/move source. For unopened files, Files shows the last submitted revision's action, so these badges can describe depot history. Status shows pending workspace changes.
 
@@ -85,7 +85,7 @@ Press `C` on any tab to edit the **current workspace's client specification** in
 
 | Tab | Commands |
 | --- | --- |
-| Status | `a` / Space reconcile or reopen to target; `A` reconcile all; `o` editor; `m` move to changelist; `u` metadata revert, keep content; `U` discard/revert |
+| Status | `t` jump between Opened and Offline / untracked; `a` / Space reconcile or reopen to target; `A` reconcile all; `o` editor; `m` move to changelist; `u` metadata revert, keep content; `U` discard/revert |
 | Log | Enter browse files; `b` annotate revision; `h` file/integration history |
 | Changes | `n` new; Space target; Enter files; `E` edit description; `s` shelve; `c` submit; `D` delete empty change |
 | Shelves | Enter files; `u` unshelve; `D` delete shelf |
@@ -117,7 +117,7 @@ quit = "Q"
 # Single characters; arrow/navigation keys remain available.
 ```
 
-Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`, `edit_client`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
+Configurable action names: `quit`, `refresh`, `help`, `search`, `up`, `down`, `open`, `reconcile`, `submit`, `sync`, `new_change`, `revert`, `edit`, `shelve`, `unshelve`, `delete`, `move_change`, `annotate`, `filelog`, `resolve`, `rename`, `lock`, `revision`, `edit_change`, `edit_client`, `status_pane`. Fixed keys are Space, `A`, `g`, `p`, `l`, `+`, digits and terminal navigation keys. Swapping two bindings requires configuring both.
 
 ## History on large depots
 
