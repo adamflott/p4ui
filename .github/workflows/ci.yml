@@ -1,7 +1,14 @@
 name: CI
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: 'Exact source commit to validate for a release'
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -13,6 +20,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo check --locked --all-targets
   perforce:
@@ -40,6 +53,9 @@ jobs:
         release: [r24.2, r26.1]
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install isolated-test tools
@@ -55,4 +71,6 @@ jobs:
       - run: cargo test --locked --test perforce -- --ignored
       - run: cargo build --locked
       - run: python3 tests/ui_smoke.py
-      - run: python3 tests/history_ui.py
+      - name: History terminal tests (when present in the selected source)
+        if: hashFiles('tests/history_ui.py') != ''
+        run: python3 tests/history_ui.py

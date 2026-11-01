@@ -28,6 +28,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
         run: python3 scripts/validate-release.py --tag "$RELEASE_TAG"
+  checks:
+    name: Release source checks
+    needs: validate
+    if: needs.validate.outputs.tag != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.validate.outputs.source_sha }}
   deb:
     name: Debian / Ubuntu (x86_64)
     needs: validate
@@ -121,6 +128,8 @@ jobs:
           python3 scripts/prepare-arch.py dist/p4ui-*.tar.gz "$RUNNER_TEMP/arch-build"
           useradd --create-home builder
           chown -R builder:builder "$RUNNER_TEMP/arch-build"
+          # $1 is expanded by the builder's shell.
+          # shellcheck disable=SC2016
           runuser -u builder -- bash -c 'cd "$1" && makepkg --noconfirm' _ "$RUNNER_TEMP/arch-build"
           pacman -U --noconfirm "$RUNNER_TEMP"/arch-build/p4ui-*.pkg.tar.zst
           p4ui --version
@@ -132,7 +141,7 @@ jobs:
           if-no-files-found: error
   release:
     name: Publish tagged GitHub release
-    needs: [validate, deb, rpm, arch]
+    needs: [validate, checks, deb, rpm, arch]
     if: needs.validate.outputs.tag != ''
     runs-on: ubuntu-latest
     permissions:

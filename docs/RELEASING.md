@@ -1,6 +1,6 @@
 # Automated releases from Git tags
 
-Pushing a **stable `vX.Y.Z` tag** runs `.github/workflows/packages.yml`. After all three Linux package builds and their installation checks succeed, the workflow publishes a GitHub Release for that exact tag. Pushing a branch builds artifacts only.
+Pushing a **stable `vX.Y.Z` tag** runs `.github/workflows/packages.yml`. After all three Linux package builds, installation checks, and the full CI suite succeed for the validated source commit, the workflow publishes a GitHub Release for that exact tag. Pushing a branch builds artifacts only.
 
 The release includes:
 
@@ -27,7 +27,7 @@ For example, to release `0.1.1`:
    git push origin v0.1.1
    ```
 
-4. Follow the **Packages** run under [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). The release appears automatically under [Releases](https://github.com/adamflott/p4ui/releases) after every package job passes.
+4. Follow the **Packages** run under [GitHub Actions](https://github.com/adamflott/p4ui/actions/workflows/packages.yml). The release appears automatically under [Releases](https://github.com/adamflott/p4ui/releases) after every package and CI job passes.
 
 Do not reuse or move a published version tag. The workflow checks that the tag, Cargo manifest/lockfile, Debian changelog and RPM version agree before starting builds. Every builder uses the same resolved source commit; the publishing job rechecks the remote tag before creating a release.
 
@@ -47,7 +47,7 @@ Re-running the old tag's original workflow definition will not pick up newly add
 
 ## Retries and validation
 
-A failed build prevents publication. A new release is first created as a draft; package uploads and checksums finish before it becomes public. If uploading fails, rerun the failed job/workflow to finish the draft. Already published releases are left unchanged on reruns, including their asset bytes. Publish a new version to replace released packages.
+A failed build or CI check prevents publication. Release checks cover Linux/macOS/Windows, MSRV, both supported P4 client/server versions and terminal workflows. The reusable CI workflow checks out the validated source SHA, including for manual releases of older tags; optional history terminal tests run when present in that source. Branch CI runs separately; tag CI runs within Packages so publication depends on its result. A new release is first created as a draft; package uploads and checksums finish before it becomes public. If uploading fails, rerun the failed job/workflow to finish the draft. Already published releases are left unchanged on reruns, including their asset bytes. Publish a new version to replace released packages.
 
 Local helper checks:
 
