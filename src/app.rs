@@ -65,7 +65,7 @@ enum Response {
     Load(Tab, Result<View>),
     ChangeFiles(String, Tab, Result<View>),
     Detail(String, Result<String>),
-    Act(Result<String>),
+    Act(Action, Result<String>),
     Edit(Result<std::path::PathBuf>),
 }
 struct Worker {
@@ -121,7 +121,10 @@ impl Worker {
                     Request::Detail(key, detail) => {
                         Response::Detail(key, connection.detail(detail))
                     }
-                    Request::Act(action) => Response::Act(connection.act(action)),
+                    Request::Act(action) => {
+                        let result = connection.act(action.clone());
+                        Response::Act(action, result)
+                    }
                     Request::Edit(file, target) => Response::Edit((|| {
                         let meta = std::fs::symlink_metadata(&file.local)?;
                         anyhow::ensure!(
@@ -374,9 +377,14 @@ impl App {
                     }
                     self.refresh_needed = true;
                 }
-                Response::Act(result) => {
+                Response::Act(action, result) => {
                     match result {
                         Ok(text) => {
+                            if matches!(&action, Action::Submit(id, _) | Action::DeleteChange(id)
+                                if id == &self.target)
+                            {
+                                self.target = "default".into();
+                            }
                             self.message("Command result", text);
                             self.status = "Completed; refreshing…".into();
                         }
@@ -1062,6 +1070,48 @@ mod tests {
             if matches!(action, Action::Delete(_, change) if change == "123")
                 && text.contains("changelist 123"))
         );
+    }
+    #[test]
+    fn successful_submit_or_delete_resets_only_the_removed_target() {
+        for action in [
+            Action::Submit("123".into(), String::new()),
+            Action::DeleteChange("123".into()),
+        ] {
+            for target in ["123", "999"] {
+                for success in [false, true] {
+                    let mut app = App::for_view(Config::default(), View::default());
+                    app.target = target.into();
+                    let (send, _requests) = mpsc::channel();
+                    let (responses, receive) = mpsc::channel();
+                    app.worker = Some(Worker {
+                        send,
+                        receive,
+                        cancel: Arc::new(AtomicBool::new(false)),
+                        handle: None,
+                    });
+                    responses
+                        .send(Response::Act(
+                            action.clone(),
+                            if success {
+                                Ok("Completed".into())
+                            } else {
+                                Err(anyhow::anyhow!("Command failed"))
+                            },
+                        ))
+                        .unwrap();
+                    app.tick().unwrap();
+                    assert_eq!(
+                        app.target,
+                        if success && target == "123" {
+                            "default"
+                        } else {
+                            target
+                        },
+                        "action={action:?}, success={success}"
+                    );
+                }
+            }
+        }
     }
     fn history_view(id: &str, next: Option<HistoryCursor>) -> View {
         View {
