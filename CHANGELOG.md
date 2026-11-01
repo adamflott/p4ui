@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Lists retain their viewport while navigating, including independent offsets for the two Status panes.
 - Depot previews check only the selected revision's size, avoiding historical scans and false size-limit errors.
 - Successful submission or deletion of the active changelist resets the target to default; failed commands preserve it.
 - Opening a file for deletion uses the active changelist and shows it in the confirmation.

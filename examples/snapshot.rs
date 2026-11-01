@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     app.detail="--- //project/main/src/client.rs#8\n+++ /workspace/src/client.rs\n@@ -12,6 +12,9 @@\n impl Client {\n     pub fn connect(&self) -> Result<Session> {\n-        self.open()\n+        let session = self.open()?;\n+        session.verify_workspace()?;\n+        Ok(session)\n     }\n }".into();
     let (w, h) = (140u16, 32u16);
     let mut terminal = Terminal::new(TestBackend::new(w, h))?;
-    terminal.draw(|f| ui::draw(f, &app))?;
+    terminal.draw(|f| ui::draw(f, &mut app))?;
     println!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" role=\"img\" aria-label=\"p4ui sample status view\">",
         w * 8 + 24,

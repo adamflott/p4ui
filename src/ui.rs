@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 #[derive(Clone, Copy)]
@@ -79,7 +79,7 @@ pub fn list_rows(height: u16) -> usize {
     height.saturating_sub(8).max(1) as usize
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let p = Palette::for_app(app);
     let size = frame.area();
     frame.render_widget(
@@ -306,7 +306,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_popup(frame, app, popup, p);
     }
 }
-fn draw_list(frame: &mut Frame, app: &App, area: Rect, p: Palette, opened: Option<bool>) {
+fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, p: Palette, opened: Option<bool>) {
     let visible = app.visible();
     let rows: Vec<(usize, &Item)> = visible
         .iter()
@@ -429,8 +429,15 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, p: Palette, opened: Optio
         .block(p.block(title, !app.focus_detail && selected.is_some()))
         .highlight_style(Style::default().bg(p.select).add_modifier(Modifier::BOLD))
         .highlight_symbol("› ");
-    let mut state = ListState::default().with_selected(selected);
-    frame.render_stateful_widget(list, area, &mut state);
+    let state = &mut app.list_states[match opened {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => 2,
+    }];
+    // Updating selection directly preserves an inactive Status pane's offset;
+    // ListState::select(None) would reset it when focus moves to the other pane.
+    *state.selected_mut() = selected;
+    frame.render_stateful_widget(list, area, state);
 }
 fn draw_popup(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
     let size = frame.area();
@@ -571,7 +578,7 @@ mod tests {
             app.detail = "@@ -1 +1 @@\n-old\n+new\n日本語 💥".into();
             for tab in Tab::ALL {
                 app.tab = tab;
-                terminal.draw(|f| draw(f, &app)).unwrap();
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
             }
             for popup in [
                 Popup::Help,
@@ -589,9 +596,59 @@ mod tests {
                 },
             ] {
                 app.popup = Some(popup);
-                terminal.draw(|f| draw(f, &app)).unwrap();
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
             }
         }
+    }
+    #[test]
+    fn scrolling_up_preserves_the_list_viewport() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::for_view(
+            Config::default(),
+            View {
+                items: (0..100)
+                    .map(|n| Item::Label {
+                        name: format!("row{n:03}"),
+                        description: String::new(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        app.tab = Tab::Labels;
+        app.selected = 50;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let offset = app.list_states[2].offset();
+        assert!(offset > 0);
+        app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.selected, 49);
+        assert_eq!(app.list_states[2].offset(), offset);
+        assert_eq!(app.list_states[2].selected(), Some(49));
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.list_states[2].offset(), 0);
+        app.switch_tab(Tab::Status);
+        app.view.items = (0..100)
+            .map(|n| {
+                Item::File(FileEntry {
+                    depot: format!("//depot/file{n:03}"),
+                    opened: n < 50,
+                    ..Default::default()
+                })
+            })
+            .collect();
+        app.selected = 49;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let opened_offset = app.list_states[0].offset();
+        assert!(opened_offset > 0);
+        app.selected = 50;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.list_states[0].offset(), opened_offset);
+        assert_eq!(app.list_states[1].selected(), Some(0));
     }
     #[test]
     fn workspace_warnings_are_available_in_help() {

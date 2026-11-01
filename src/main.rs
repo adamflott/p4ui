@@ -200,7 +200,7 @@ fn run() -> Result<()> {
             }
             app.refresh();
         }
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key)

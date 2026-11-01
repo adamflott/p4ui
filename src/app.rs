@@ -160,6 +160,7 @@ pub struct App {
     pub tab: Tab,
     pub view: View,
     pub selected: usize,
+    pub(crate) list_states: [ratatui::widgets::ListState; 3],
     pub filter: String,
     pub searching: bool,
     pub detail: String,
@@ -203,6 +204,7 @@ impl App {
             tab: Tab::Status,
             view,
             selected: 0,
+            list_states: Default::default(),
             filter: String::new(),
             searching: false,
             detail: String::new(),
@@ -544,6 +546,7 @@ impl App {
         self.history_paging_blocked = false;
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.tab = tab;
+        self.list_states = Default::default();
         self.view.items.clear();
         self.selected = 0;
         self.filter.clear();
