@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{ErrorKind, Read, Seek, SeekFrom, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -114,21 +114,42 @@ impl Connection {
             input.write_all(form.as_bytes())?;
             input.seek(SeekFrom::Start(0))?;
         }
-        let mut child = RunningP4(
-            self.command(json)
-                .args(args)
-                .stdin(Stdio::from(input))
-                .stdout(out.try_clone()?)
-                .stderr(err.try_clone()?)
-                .spawn()
-                .with_context(|| {
-                    format!(
-                        "Could not start {}. Install the Perforce command-line client.",
-                        self.executable.display()
-                    )
-                })?,
-        );
+        let mut command = self.command(json);
+        command
+            .args(args)
+            .stdin(Stdio::from(input))
+            .stdout(out.try_clone()?)
+            .stderr(err.try_clone()?);
         let start = Instant::now();
+        let spawn_budget = self.timeout.min(Duration::from_secs(1));
+        let mut child = RunningP4(loop {
+            ensure!(
+                !self.cancelled.load(Ordering::Relaxed),
+                "p4 {} cancelled before start",
+                args.first().unwrap_or(&"")
+            );
+            match command.spawn() {
+                Ok(child) => break child,
+                // Linux can briefly inherit a writer during concurrent process
+                // creation. Only retry failed execs: no P4 command has run yet.
+                Err(error)
+                    if error.kind() == ErrorKind::ExecutableFileBusy
+                        && start.elapsed() < spawn_budget =>
+                {
+                    thread::sleep(
+                        Duration::from_millis(15).min(spawn_budget.saturating_sub(start.elapsed())),
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Could not start {}. Install the Perforce command-line client.",
+                            self.executable.display()
+                        )
+                    });
+                }
+            }
+        });
         let status = loop {
             if let Some(status) = child.0.try_wait()? {
                 break status;

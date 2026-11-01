@@ -2,7 +2,7 @@
 
 ## Automated coverage
 
-`cargo test --locked` runs parser, configuration, confirmation/input, terminal rendering, and process-boundary tests. UI rendering is exercised at 40×10 (resize notice), 60×14, 100×30, and 160×50 with Unicode and every popup/tab. Process tests check hanging commands, excess output and nonzero exits with otherwise valid JSON.
+`cargo test --locked` runs parser, configuration, confirmation/input, terminal rendering, and process-boundary tests. UI rendering is exercised at 40×10 (resize notice), 60×14, 100×30, and 160×50 with Unicode and every popup/tab. Process tests check hanging commands, excess output and nonzero exits with otherwise valid JSON. Linux tests hold an executable open for writing to check bounded, cancellable startup retries, unchanged form input, and exactly one execution after the writer closes.
 
 `cargo test --locked --test perforce -- --ignored` runs the real client/server suite. Each test owns a temporary database, workspace, configuration, trust and ticket paths. The suite covers:
 

@@ -33,8 +33,80 @@ fn timeout_and_cancellation_reap_the_client() -> Result<()> {
 }
 #[test]
 fn nonzero_exit_is_never_a_success_even_with_valid_json() -> Result<()> {
-    let (_dir, c) = fake("import sys\nprint('{\"data\":\"partial success\"}')\nsys.exit(2)")?;
+    let (_dir, c) = fake(
+        "import pathlib,sys\nwith pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write('started\\n')\nprint('{\"data\":\"partial success\"}')\nsys.exit(2)",
+    )?;
     assert!(c.records(&["info"]).is_err());
+    assert_eq!(
+        std::fs::read_to_string(c.executable.with_extension("calls"))?,
+        "started\n"
+    );
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn busy_executable_retries_before_start_and_preserves_form_input() -> Result<()> {
+    let (_dir, c) = fake(
+        "import pathlib,sys\nwith pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write('started\\n')\nprint(sys.stdin.read(),end='')",
+    )?;
+    // Holding a writer makes exec fail with ETXTBSY before the script can run.
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&c.executable)?;
+    let error = std::process::Command::new(&c.executable)
+        .spawn()
+        .err()
+        .context("Expected an executable held open for writing to be busy")?;
+    assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    std::thread::scope(|scope| -> Result<()> {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(writer);
+        });
+        assert_eq!(
+            c.execute(&["client", "-i"], Some("form input\n"), false)?,
+            "form input\n"
+        );
+        Ok(())
+    })?;
+    assert_eq!(
+        std::fs::read_to_string(c.executable.with_extension("calls"))?,
+        "started\n"
+    );
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn busy_executable_retry_is_bounded_and_cancellable() -> Result<()> {
+    for cancel in [false, true] {
+        let (_dir, mut c) = fake("raise AssertionError('Must not start')")?;
+        c.timeout = Duration::from_millis(100);
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&c.executable)?;
+        let start = Instant::now();
+        let error = std::thread::scope(|scope| -> Result<anyhow::Error> {
+            if cancel {
+                let cancelled = &c.cancelled;
+                scope.spawn(move || {
+                    std::thread::sleep(Duration::from_millis(30));
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            c.records(&["info"]).err().context("Must not start")
+        })?;
+        assert!(start.elapsed() < Duration::from_secs(2));
+        if cancel {
+            assert!(error.to_string().contains("cancelled before start"));
+        } else {
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::ExecutableFileBusy)
+            );
+        }
+    }
     Ok(())
 }
 #[test]

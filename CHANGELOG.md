@@ -4,6 +4,8 @@
 
 - Status restores its selected file, filter, and both pane viewports after tab switches and fresh reloads; workspace changes reset the bookmark.
 - Help explains file action badges, depot history versus workspace changes, and navigation between Status panes.
+- Brief executable-busy startup errors retry within a bounded, cancellable interval, without retrying any command that has started.
+
 ## 0.3.0 — 2026-11-01
 
 - `./scripts/release.py VERSION` prepares version metadata, validates clean/current repository state, runs local and GitHub checks, verifies draft packages, and publishes only after all checks pass; `--check` and `--resume` support validation and recovery.
