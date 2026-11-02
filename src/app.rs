@@ -170,7 +170,7 @@ impl Worker {
                                 .context("Missing history connection")?;
                             connection.history_page(tab, cursor, size, context)
                         })();
-                        if result.is_err() {
+                        if result.is_err() && !connection.cancelled.load(Ordering::Relaxed) {
                             cache.clear();
                         }
                         Response::History(tab, cursor, epoch, result)
@@ -183,7 +183,7 @@ impl Worker {
                                 .load_with_info(tab, limit, cache.info())
                                 .inspect(|view| cache.put_view(tab, limit, view))
                         };
-                        if result.is_err() {
+                        if result.is_err() && !connection.cancelled.load(Ordering::Relaxed) {
                             cache.clear();
                         }
                         Response::Load(tab, result)
@@ -193,7 +193,7 @@ impl Worker {
                     }
                     Request::Detail(key, detail) => {
                         let reusable = matches!(&detail, Detail::Item(item, tab)
-                            if !matches!(tab, Tab::Status | Tab::Resolve) && !matches!(item, Item::File(f) if f.opened));
+                            if !matches!(tab, Tab::Status | Tab::Resolve) && !matches!(item, Item::Revision { .. }) && !matches!(item, Item::File(f) if f.opened));
                         let result = if reusable && let Some(text) = cache.detail(&key) {
                             Ok(text)
                         } else {
@@ -203,7 +203,7 @@ impl Worker {
                                 }
                             })
                         };
-                        if result.is_err() {
+                        if result.is_err() && !connection.cancelled.load(Ordering::Relaxed) {
                             cache.clear();
                         }
                         Response::Detail(key, result)

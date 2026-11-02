@@ -338,7 +338,7 @@ fn drive_app(app: &mut p4ui::app::App, ready: impl Fn(&p4ui::app::App) -> bool) 
 }
 fn cached_reads_fake() -> Result<(tempfile::TempDir, Connection)> {
     fake(
-        r#"import json,pathlib,sys
+        r#"import json,pathlib,sys,time
 args=sys.argv[1:];root=pathlib.Path(__file__).parent
 with root.joinpath('calls').open('a') as f: f.write(json.dumps(args)+'\n')
 if 'info' in args:
@@ -346,6 +346,9 @@ if 'info' in args:
 elif 'changes' in args:
  print(json.dumps({'change':'100','desc':'Example','user':'tester','client':'test','status':'submitted'}))
 elif 'describe' in args: print('Summary')
+elif 'diff2' in args: print('Diff for '+args[-1])
+elif 'fstat' in args: root.joinpath('started').touch();time.sleep(10)
+elif 'reconcile' in args: assert '-n' in args
 elif 'labels' in args: pass
 elif 'sync' in args: print(json.dumps({'data':'Sync completed'}))
 else: raise AssertionError('Unexpected command: '+repr(args))
@@ -438,6 +441,61 @@ fn cached_views_cannot_authorize_a_mutation_in_a_changed_workspace() -> Result<(
         matches!(&app.popup, Some(Popup::Message { text, .. }) if text.contains("Workspace identity changed"))
     );
     assert_eq!(cached_calls(dir.path(), "sync"), 0);
+    Ok(())
+}
+#[test]
+fn revision_drilldowns_never_reuse_a_different_changes_diff() -> Result<()> {
+    use p4ui::{
+        app::App,
+        model::{Item, Tab},
+    };
+    let (dir, connection) = cached_reads_fake()?;
+    let mut app = App::new(
+        Config {
+            refresh_seconds: 0,
+            ..Config::default()
+        },
+        connection,
+    );
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    for revision in [2, 3] {
+        app.view.items = vec![Item::Revision {
+            depot: "//depot/file".into(),
+            revision: revision.to_string(),
+            action: "edit".into(),
+            change: (revision * 100).to_string(),
+            shelved: false,
+        }];
+        app.view.history = None;
+        app.scroll(0, true);
+        drive_app(&mut app, |app| {
+            !app.busy && app.detail == format!("Diff for //depot/file#{revision}\n")
+        })?;
+    }
+    assert_eq!(cached_calls(dir.path(), "diff2"), 2);
+    Ok(())
+}
+#[test]
+fn cancelled_tab_reads_preserve_other_successful_read_cache_entries() -> Result<()> {
+    use p4ui::{app::App, model::Tab};
+    let (dir, connection) = cached_reads_fake()?;
+    let mut app = App::new(
+        Config {
+            refresh_seconds: 0,
+            ..Config::default()
+        },
+        connection,
+    );
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    app.switch_tab(Tab::Status);
+    drive_app(&mut app, |_| dir.path().join("started").exists())?;
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    assert!(app.popup.is_none());
+    assert_eq!(cached_calls(dir.path(), "changes"), 1);
+    assert_eq!(cached_calls(dir.path(), "describe"), 1);
     Ok(())
 }
 fn history_queries(path: &std::path::Path) -> Result<Vec<Vec<String>>> {
