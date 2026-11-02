@@ -531,6 +531,7 @@ impl App {
             return Ok(());
         }
         if self.config.refresh_seconds > 0
+            && !self.busy
             && !self.tab.is_history()
             && self.drill.is_none()
             && self.popup.is_none()
@@ -1398,6 +1399,54 @@ mod tests {
         assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
         app.key(key('k')).unwrap();
         assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn automatic_refresh_does_not_queue_a_second_scan_while_loading() {
+        let mut app = App::for_view(Config::default(), status_view(2, 2));
+        let (send, requests) = mpsc::channel();
+        let (responses, receive) = mpsc::channel();
+        app.worker = Some(Worker {
+            send,
+            receive,
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        });
+        app.detail_needed = false;
+        app.last_refresh = Instant::now() - Duration::from_secs(60);
+        app.tick().unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Request::Load(Tab::Status, _)
+        ));
+        for _ in 0..10 {
+            app.tick().unwrap();
+        }
+        assert!(!app.refresh_needed);
+        responses
+            .send(Response::Load(Tab::Status, Ok(status_view(2, 2))))
+            .unwrap();
+        app.tick().unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "Automatic scan was duplicated"
+        );
+        // A manual refresh requested while a scan is busy still runs once.
+        app.refresh();
+        app.tick().unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Request::Load(Tab::Status, _)
+        ));
+        app.refresh();
+        responses
+            .send(Response::Load(Tab::Status, Ok(status_view(2, 2))))
+            .unwrap();
+        app.tick().unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Request::Load(Tab::Status, _)
+        ));
+        assert!(requests.try_recv().is_err());
     }
     #[test]
     fn status_pane_shortcut_jumps_past_large_opened_lists_and_leaves_diff_focus() {
