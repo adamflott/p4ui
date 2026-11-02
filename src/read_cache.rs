@@ -97,8 +97,9 @@ impl ReadCache {
 }
 
 fn view_bytes(view: &View) -> usize {
-    let mut bytes =
-        std::mem::size_of::<View>() + view.warnings.iter().map(String::len).sum::<usize>();
+    let mut bytes = std::mem::size_of::<View>()
+        + view.warnings.len() * std::mem::size_of::<String>()
+        + view.warnings.iter().map(String::len).sum::<usize>();
     for item in &view.items {
         bytes += std::mem::size_of::<Item>()
             + match item {
@@ -218,6 +219,16 @@ mod tests {
         assert!(cache.details.is_empty());
         cache.put_view(Tab::Status, 200, &view);
         assert!(cache.views.is_empty());
+        let warning_heavy = View {
+            info: view.info.clone(),
+            warnings: vec![String::new(); 100_000],
+            ..View::default()
+        };
+        cache.put_view(Tab::Files, 200, &warning_heavy);
+        assert!(
+            cache.view(Tab::Files, 200).is_none(),
+            "Warning storage exceeded the listing budget"
+        );
         cache.clear();
         assert!(cache.info().is_none());
     }
