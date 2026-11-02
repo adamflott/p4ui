@@ -39,7 +39,9 @@ p4ui -u alice -c alice-workspace
 P4PORT=perforce.example.com:1666 p4ui --check
 ```
 
-For the server address, p4ui uses `--port` / `-p` first, then a nonempty `P4PORT`, then the normal `p4` configuration (including `P4CONFIG` / `P4ENVIRO`). The chosen flag or environment address overrides a server address in a workspace config file. Other settings such as `P4USER`, `P4CLIENT`, `P4CHARSET`, trust, ignore rules, and login tickets continue to use normal `p4` resolution. Explicit connection flags override their corresponding settings. Authentication/SSO, trust enrollment, server administration, and workspace creation remain in the `p4` CLI. No passwords are accepted on p4ui's command line or stored in its configuration.
+An explicit `--port` / `-p` overrides the server address. Without that flag, p4ui delegates connection settings to the native `p4` client: **P4CONFIG settings override environment variables such as `P4PORT`**. For example, with `P4CONFIG=.perforce`, a checkout's `.perforce` can select a different server than the shell's exported `P4PORT`. The client searches the launch directory and its parents, taking each setting from the nearest config file that defines it. `P4PORT` still supplies the server when the config files do not set one. See [Perforce configuration precedence](https://help.perforce.com/helix-core/server-apps/p4sag/2025.2/Content/P4SAG/config-param-precedence.html).
+
+Other settings such as `P4USER`, `P4CLIENT`, `P4CHARSET`, `P4ENVIRO`, trust, ignore rules, and login tickets also use normal `p4` resolution. Explicit connection flags override their corresponding settings. Authentication/SSO, trust enrollment, server administration, and workspace creation remain in the `p4` CLI. No passwords are accepted on p4ui's command line or stored in its configuration.
 
 `--max-p4-processes N` limits concurrent P4 commands per p4ui instance. The default is **4**; use **1** for serial requests or **2** to reduce concurrency. Independent read-only requests run in parallel, including Status queries and the initial history/connection lookup. Mutations remain serialized, and older history pages follow their cursor order.
 

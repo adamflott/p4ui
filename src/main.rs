@@ -41,8 +41,8 @@ struct Args {
     /// Directory to use (status/sync/reconcile are scoped to its descendants)
     #[arg(short = 'd', long, default_value = ".")]
     directory: PathBuf,
-    /// Perforce server; overrides P4PORT (otherwise use normal p4 configuration)
-    #[arg(short = 'p', long, env = "P4PORT", hide_env_values = true)]
+    /// Perforce server override (otherwise p4 resolves P4CONFIG and P4PORT)
+    #[arg(short = 'p', long)]
     port: Option<String>,
     /// Perforce user (otherwise P4USER/P4CONFIG)
     #[arg(short = 'u', long)]
@@ -138,7 +138,8 @@ fn run() -> Result<()> {
     let mut connection = Connection::new(directory, &config);
     connection.set_max_processes(args.max_p4_processes);
     connection.executable = args.p4;
-    // An empty P4PORT leaves resolution to the normal p4 configuration.
+    // Only an explicit flag becomes `p4 -p`. Inherited P4PORT must remain in
+    // the environment so the native client's P4CONFIG precedence is preserved.
     connection.port = args.port.filter(|port| !port.is_empty());
     connection.user = args.user;
     connection.client = args.client;

@@ -959,20 +959,20 @@ fn cli_p4port_environment_and_connection_precedence() -> Result<()> {
         .port
         .as_deref()
         .context("Fixture server address missing")?;
-    let base = || {
+    let from = |directory: &std::path::Path| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_p4ui"));
         command
             .envs(fixture.connection.environment.iter().cloned())
             .env("P4USER", "tester")
             .env("P4CLIENT", "test")
-            .args([
-                "--directory",
-                &fixture.connection.directory.to_string_lossy(),
-            ])
+            .env("P4CONFIG", ".perforce")
+            .arg("--directory")
+            .arg(directory)
             .arg("--config")
             .arg(&config);
         command
     };
+    let base = || from(&fixture.connection.directory);
     let run = |command: &mut Command| -> Result<String> {
         let output = command.output()?;
         ensure!(
@@ -998,11 +998,33 @@ fn cli_p4port_environment_and_connection_precedence() -> Result<()> {
             .contains("tester@test")
         );
     }
-    let p4config = fixture.path(".p4ui-nonexistent-config");
-    // A provided environment address is an explicit p4ui connection choice.
+    let p4config = fixture.path(".perforce");
+    // A workspace P4CONFIG value overrides even a nonempty process environment.
+    std::fs::write(&p4config, format!("P4PORT={port}\n"))?;
+    ensure!(run(base().env("P4PORT", "127.0.0.1:1").arg("--check"))?.contains("tester@test"));
+    for mode in ["--status", "--log"] {
+        let view: serde_json::Value =
+            serde_json::from_str(&run(base().env("P4PORT", "127.0.0.1:1").arg(mode))?)?;
+        ensure!(view["info"]["client"] == "test");
+    }
+    // The native client searches parent directories and merges settings per key.
+    let nested = fixture.path("subdir/nested");
+    std::fs::create_dir_all(&nested)?;
+    std::fs::write(fixture.path("subdir/.perforce"), "P4CLIENT=test\n")?;
+    ensure!(
+        run(from(&nested).env("P4PORT", "127.0.0.1:1").arg("--check"))?.contains("tester@test")
+    );
+    // Explicit CLI flags override both workspace config and process environment.
     std::fs::write(&p4config, "P4PORT=127.0.0.1:1\n")?;
-    ensure!(run(base().env("P4PORT", port).arg("--check"))?.contains("tester@test"));
-    // With no port or an empty env value, retain the existing p4 config fallback.
+    for flag in ["--port", "-p"] {
+        ensure!(
+            run(base()
+                .env("P4PORT", "127.0.0.1:2")
+                .args([flag, port, "--check"]))?
+            .contains("tester@test")
+        );
+    }
+    // No port or an empty environment value still uses the workspace config.
     std::fs::write(&p4config, format!("P4PORT={port}\n"))?;
     ensure!(run(base().env_remove("P4PORT").arg("--check"))?.contains("tester@test"));
     ensure!(run(base().env("P4PORT", "").arg("--check"))?.contains("tester@test"));

@@ -79,7 +79,7 @@ p4ui --client your-workspace --check
 p4ui --client your-workspace
 ```
 
-The order is `--port` / `-p`, then nonempty `P4PORT`, then the normal Perforce config-file/settings fallback. Existing `--user`, `--client`, login tickets, and other configuration sources continue to work.
+An explicit `--port` / `-p` wins. Otherwise the native `p4` client resolves settings, so values in files named by `P4CONFIG` (such as `.perforce`) override environment variables, including `P4PORT`. Config files are searched in the launch directory and its parents, with the nearest definition of each setting taking precedence. `P4PORT` is still used when no config file defines the server address. Existing `--user`, `--client`, login tickets, and other configuration sources continue to work.
 
 Install the proprietary Perforce `p4` client separately from [Perforce's downloads](https://www.perforce.com/downloads/helix-command-line-client-p4) or its supported package repository for your OS/architecture. The client is not bundled with p4ui. Its package name varies across repositories. Verify `p4 -V`; merely building/installing p4ui does not create a workspace or log in.
 

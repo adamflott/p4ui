@@ -29,7 +29,7 @@ Performance regressions cover idle terminal output, coalesced refreshes and tab 
 - The Status pane shortcut jumps past 10,000 opened files, leaves diff focus, honors filters, handles empty destinations, supports remapping, and updates the rendered pane selection.
 - Cancelling a slow Status read on a tab switch without cancelling an active mutation.
 - Counting live P4 children to verify the shared concurrency cap, CLI limits, parallel read overlap, cancellation while waiting for a slot, and slot release/reaping after spawn failures or timeouts.
-- CLI connections using only P4PORT for the server address, explicit-port precedence, empty-env/config fallback and environment-driven JSON status.
+- CLI connections using only P4PORT for the server address, P4CONFIG overriding conflicting environment settings, parent/child config lookup, explicit-port precedence over both config and environment, empty-env fallback, and JSON status/history configuration.
 - Concurrent edits from two workspaces, failed submits, safe resolve preserving conflicts, explicit resolution and successful resubmit.
 - Dirty-workspace switch rejection, stream creation/deletion, branch population, parent merge and copy promotion under normal stream flow rules.
 
