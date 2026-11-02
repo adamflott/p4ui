@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-02
+
 - Connection settings follow native Perforce precedence: a checkout's P4CONFIG file overrides P4PORT from the environment, while an explicit `--port` / `-p` still wins.
 - Recent tab listings, previews, and connection metadata use bounded 10-second read caches; rapid tab selections coalesce, explicit refreshes bypass caches, and mutations verify current workspace identity.
 - Status requests only required `fstat` fields, streams JSON records into file entries, and sorts/deduplicates without cloning path keys.

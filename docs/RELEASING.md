@@ -19,7 +19,7 @@ macOS/Windows release binaries and prerelease tags such as `v0.2.0-beta.1` are o
 From a clean default branch synchronized with `origin`, run:
 
 ```sh
-./scripts/release.py 0.3.1
+./scripts/release.py 0.4.1
 ```
 
 Choose a stable version higher than the current package version and every existing stable tag/release. Push ordinary source changes first and add real notes under `CHANGELOG.md`'s Unreleased section. Python **3.11+**, Git, an authenticated GitHub CLI (`gh auth login`), Rust/Cargo with rustfmt and Clippy, Bash, `p4`, and `p4d` must be on PATH. Run on macOS or Linux; GitHub CI validates Windows. Git's commit identity and any configured signing credentials must already work.
@@ -35,7 +35,7 @@ The command:
 Check everything locally and remotely without making a release:
 
 ```sh
-./scripts/release.py 0.3.1 --check
+./scripts/release.py 0.4.1 --check
 ```
 
 `--check` creates no commit, tag, GitHub release, or remote update. It uses and removes a temporary worktree and may populate ordinary Cargo caches. There are no flags to skip tests or override failed checks.
