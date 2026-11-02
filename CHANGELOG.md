@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Lists format only their visible rows, reuse filter/pane indices, and index diff lines sparsely to bound rendering work and temporary memory.
 - The UI redraws only after state changes, with worker notifications and scheduled deadlines; external editors retain exclusive terminal input.
 - Automatic refreshes no longer queue duplicate workspace scans while an existing load is busy; explicit refresh requests remain available.
 - `t` on Status jumps directly between Opened and Offline / untracked, including from diff focus; filters are honored and the key is remappable.

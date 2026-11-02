@@ -171,8 +171,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_list(frame, app, horizontal[0], p, None);
     }
     let detail_text: Vec<Line> = app
-        .detail
-        .lines()
+        .detail_window(
+            app.detail_scroll.0 as usize,
+            horizontal[1].height.saturating_sub(2) as usize,
+        )
+        .into_iter()
         .map(|l| {
             let color = if l.starts_with('+') {
                 p.added
@@ -201,7 +204,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 format!(" {} ", one_line(&app.detail_title)),
                 app.focus_detail,
             ))
-            .scroll(app.detail_scroll),
+            .scroll((0, app.detail_scroll.1)),
         horizontal[1],
     );
     let status = if app.searching || !app.filter.is_empty() {
@@ -335,32 +338,47 @@ fn contextual_hints(app: &App) -> String {
     }
 }
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, p: Palette, opened: Option<bool>) {
-    let visible = app.visible();
-    let rows: Vec<(usize, &Item)> = visible
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| {
-            if let Some(open) = opened
-                && !matches!(item,Item::File(f) if f.opened==open)
-            {
-                return None;
-            }
-            Some((i, *item))
-        })
-        .collect();
+    let rows = app.rows();
+    let positions = opened.map(|open| &rows.panes[usize::from(!open)]);
+    let count = positions.map_or(rows.indices.len(), |positions| positions.len());
+    let selected = if let Some(positions) = positions {
+        positions.binary_search(&app.selected).ok()
+    } else {
+        (app.selected < count).then_some(app.selected)
+    };
+    let state_index = match opened {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => 2,
+    };
+    let height = area.height.saturating_sub(2) as usize;
+    let mut offset = app.list_states[state_index]
+        .offset()
+        .min(count.saturating_sub(height));
+    if height > 0
+        && let Some(selected) = selected
+    {
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset + height {
+            offset = selected + 1 - height;
+        }
+    }
     let title = match opened {
-        Some(true) => format!(" Opened ({}) ", rows.len()),
-        Some(false) => format!(" Offline / untracked ({}) ", rows.len()),
+        Some(true) => format!(" Opened ({count}) "),
+        Some(false) => format!(" Offline / untracked ({count}) "),
         None => format!(
             " {} ({}) ",
             app.drill.as_deref().unwrap_or(app.tab.name()),
-            rows.len()
+            count
         ),
     };
-    let selected = rows.iter().position(|(i, _)| *i == app.selected);
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|(_, item)| {
+    let items: Vec<ListItem> = (offset..count.min(offset + height))
+        .map(|position| {
+            let visible_position = positions.map_or(position, |positions| positions[position]);
+            let item = &app.view.items[rows.indices[visible_position]];
+            #[cfg(test)]
+            FORMATTED_ROWS.with(|count| count.set(count.get() + 1));
             let (text, color) = match item {
                 Item::File(f) => {
                     let icon = match f.action.as_str() {
@@ -453,20 +471,24 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, p: Palette, opened: O
             ListItem::new(text).style(Style::default().fg(color))
         })
         .collect();
+    drop(rows);
     let list = List::new(items)
         .block(p.block(title, !app.focus_detail && selected.is_some()))
         .highlight_style(Style::default().bg(p.select).add_modifier(Modifier::BOLD))
         .highlight_symbol("› ");
-    let state = &mut app.list_states[match opened {
-        Some(true) => 0,
-        Some(false) => 1,
-        None => 2,
-    }];
+    let state = &mut app.list_states[state_index];
     // Updating selection directly preserves an inactive Status pane's offset;
     // ListState::select(None) would reset it when focus moves to the other pane.
     *state.selected_mut() = selected;
-    frame.render_stateful_widget(list, area, state);
+    *state.offset_mut() = offset;
+    let mut viewport = ratatui::widgets::ListState::default();
+    *viewport.selected_mut() = selected
+        .and_then(|index| index.checked_sub(offset))
+        .filter(|index| *index < height);
+    frame.render_stateful_widget(list, area, &mut viewport);
 }
+#[cfg(test)]
+thread_local! { static FORMATTED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 fn draw_popup(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
     let size = frame.area();
     let width = size.width.saturating_sub(6).min(100);
@@ -586,6 +608,51 @@ mod tests {
     use super::*;
     use crate::{config::Config, model::*};
     use ratatui::{Terminal, backend::TestBackend};
+    #[test]
+    fn large_status_formats_only_the_visible_rows_and_updates_filtered_counts() {
+        let items = (0..100_000)
+            .map(|index| {
+                Item::File(FileEntry {
+                    depot: format!("//depot/file{index:06}"),
+                    opened: index % 2 == 0,
+                    action: "edit".into(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mut app = App::for_view(
+            Config::default(),
+            View {
+                items,
+                ..View::default()
+            },
+        );
+        app.selected = 99_999;
+        app.detail = (0..100_000)
+            .map(|index| format!("line {index}\n"))
+            .collect();
+        app.detail_scroll.0 = 60_000;
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        FORMATTED_ROWS.with(|count| count.set(0));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(FORMATTED_ROWS.with(|count| count.get()) <= 32);
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Opened (50000)"));
+        assert!(text.contains("Offline / untracked (50000)"));
+        assert!(text.contains("file099999"));
+        assert!(text.contains("line 60000"));
+        app.filter = "file000123".into();
+        app.selected = 0;
+        FORMATTED_ROWS.with(|count| count.set(0));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(FORMATTED_ROWS.with(|count| count.get()), 1);
+    }
     #[test]
     fn all_tabs_and_popups_render_at_small_and_large_sizes() {
         for (w, h) in [(40, 10), (60, 14), (100, 30), (160, 50)] {

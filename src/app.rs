@@ -2,6 +2,7 @@ use crate::{config::Config, events::Wake, model::*, p4::Connection};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
+    cell::{Ref, RefCell},
     io::{Read, Write},
     sync::{
         Arc,
@@ -249,6 +250,8 @@ pub struct App {
     refresh_needed: bool,
     detail_needed: bool,
     selection_changed: Instant,
+    row_cache: RefCell<crate::view_cache::Rows>,
+    detail_index: RefCell<crate::view_cache::Lines>,
 }
 impl App {
     pub fn new(config: Config, connection: Connection) -> Self {
@@ -299,18 +302,36 @@ impl App {
             refresh_needed: false,
             detail_needed: true,
             selection_changed: Instant::now(),
+            row_cache: RefCell::default(),
+            detail_index: RefCell::default(),
         }
     }
     pub fn visible(&self) -> Vec<&Item> {
-        let needle = self.filter.to_lowercase();
-        self.view
-            .items
+        self.rows()
+            .indices
             .iter()
-            .filter(|i| needle.is_empty() || i.search_text().to_lowercase().contains(&needle))
+            .map(|index| &self.view.items[*index])
             .collect()
     }
+    pub(crate) fn rows(&self) -> Ref<'_, crate::view_cache::Rows> {
+        self.row_cache
+            .borrow_mut()
+            .update(&self.view.items, &self.filter);
+        self.row_cache.borrow()
+    }
+    fn invalidate_rows(&self) {
+        self.row_cache.borrow_mut().invalidate();
+    }
+    pub(crate) fn detail_window(&self, first: usize, count: usize) -> Vec<&str> {
+        self.detail_index
+            .borrow_mut()
+            .window(&self.detail, first, count)
+    }
     pub fn current(&self) -> Option<Item> {
-        self.visible().get(self.selected).map(|i| (*i).clone())
+        self.rows()
+            .indices
+            .get(self.selected)
+            .map(|index| self.view.items[*index].clone())
     }
     fn current_key(&self) -> String {
         self.current()
@@ -322,6 +343,7 @@ impl App {
         self.selection_changed = Instant::now();
         self.detail_scroll = (0, 0);
         self.detail.clear();
+        self.detail_index.borrow_mut().invalidate();
         self.detail_title = "Diff / details".into();
     }
     fn jump_status_pane(&mut self) {
@@ -415,6 +437,7 @@ impl App {
                         match result {
                             Ok(view) => {
                                 self.view = view;
+                                self.invalidate_rows();
                                 self.selected =
                                     self.selected.min(self.visible().len().saturating_sub(1));
                                 self.detail_needed = true;
@@ -453,6 +476,7 @@ impl App {
                                     self.selection_updated();
                                 }
                                 self.view = view;
+                                self.invalidate_rows();
                                 self.selected = key
                                     .and_then(|k| self.visible().iter().position(|i| i.key() == k))
                                     .unwrap_or(self.selected)
@@ -485,6 +509,7 @@ impl App {
                 Response::Detail(key, result) => {
                     if key == self.current_key() {
                         self.detail = result.unwrap_or_else(|e| format!("{e:#}"));
+                        self.detail_index.borrow_mut().invalidate();
                     }
                 }
                 Response::Edit(result) => {
@@ -598,6 +623,7 @@ impl App {
                 self.send(Request::Detail(key, Detail::Item(item, self.tab)))?;
             } else {
                 self.detail.clear();
+                self.detail_index.borrow_mut().invalidate();
             }
         }
         Ok(changed)
@@ -666,6 +692,7 @@ impl App {
                     .into(),
             );
         }
+        self.invalidate_rows();
         self.selected = key
             .and_then(|key| self.visible().iter().position(|item| item.key() == key))
             .unwrap_or(self.selected)
@@ -732,6 +759,7 @@ impl App {
         self.tab = tab;
         self.list_states = Default::default();
         self.view.items.clear();
+        self.invalidate_rows();
         self.selected = 0;
         self.filter.clear();
         self.status_restore_pending = false;
@@ -859,6 +887,7 @@ impl App {
                 if self.drill.take().is_some() {
                     if let Some(parent) = self.parent.take() {
                         self.view = parent.view;
+                        self.invalidate_rows();
                         self.selected = parent.selected;
                         self.filter = parent.filter;
                         self.list_states = parent.list_states;
@@ -919,6 +948,7 @@ impl App {
                         list_states: std::mem::take(&mut self.list_states),
                     });
                     self.view.items.clear();
+                    self.invalidate_rows();
                     self.view.history = None;
                     self.drill = Some(id);
                     self.selected = 0;
@@ -1437,6 +1467,18 @@ mod tests {
         assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
         app.key(key('k')).unwrap();
         assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn fresh_view_invalidates_filter_indices_even_when_reusing_the_same_allocation() {
+        let mut app = App::for_view(Config::default(), status_view(4, 0));
+        app.filter = "opened".into();
+        assert_eq!(app.visible().len(), 4);
+        let mut fresh = std::mem::take(&mut app.view);
+        if let Item::File(file) = &mut fresh.items[0] {
+            file.depot = "//depot/renamed".into();
+        }
+        reply(&mut app, Response::Load(Tab::Status, Ok(fresh)));
+        assert_eq!(app.visible().len(), 3);
     }
     #[test]
     fn idle_ticks_do_not_request_rendering_and_deferred_work_has_a_deadline() {
