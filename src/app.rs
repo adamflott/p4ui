@@ -1,4 +1,4 @@
-use crate::{config::Config, model::*, p4::Connection};
+use crate::{config::Config, events::Wake, model::*, p4::Connection};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{
@@ -118,7 +118,7 @@ impl Drop for Worker {
     }
 }
 impl Worker {
-    fn new(mut connection: Connection) -> Self {
+    fn new(mut connection: Connection, wake: Option<Sender<Wake>>) -> Self {
         let (send, jobs) = mpsc::channel();
         let (results, receive) = mpsc::channel();
         let cancel = connection.cancelled.clone();
@@ -180,6 +180,9 @@ impl Worker {
                 };
                 if results.send(result).is_err() {
                     break;
+                }
+                if let Some(wake) = &wake {
+                    let _ = wake.send(Wake::Worker);
                 }
             }
         });
@@ -249,8 +252,11 @@ pub struct App {
 }
 impl App {
     pub fn new(config: Config, connection: Connection) -> Self {
+        Self::with_wake(config, connection, None)
+    }
+    pub fn with_wake(config: Config, connection: Connection, wake: Option<Sender<Wake>>) -> Self {
         let mut app = Self::for_view(config, View::default());
-        app.worker = Some(Worker::new(connection));
+        app.worker = Some(Worker::new(connection, wake));
         app.refresh_needed = true;
         app
     }
@@ -371,9 +377,12 @@ impl App {
         }
         Ok(())
     }
-    pub fn tick(&mut self) -> Result<()> {
+    /// Process ready results/timers and report whether the visible state changed.
+    pub fn tick(&mut self) -> Result<bool> {
+        let mut changed = false;
         let response = self.worker.as_ref().and_then(|w| w.receive.try_recv().ok());
         if let Some(response) = response {
+            changed = true;
             self.busy = false;
             if !self.mutating
                 && self
@@ -382,7 +391,7 @@ impl App {
                     .is_some_and(|worker| worker.cancel.load(Ordering::Relaxed))
             {
                 // Discard cancelled reads even after a quick tab round trip.
-                return Ok(());
+                return Ok(changed);
             }
             self.mutating = false;
             match response {
@@ -528,7 +537,7 @@ impl App {
         // Keep the worker idle while the client form is in an editor or awaiting
         // confirmation. A background refresh must not consume its save request.
         if self.external_edit.is_some() || self.client_draft.is_some() {
-            return Ok(());
+            return Ok(changed);
         }
         if self.config.refresh_seconds > 0
             && !self.busy
@@ -541,6 +550,7 @@ impl App {
             self.refresh_needed = true;
         }
         if !self.busy && self.refresh_needed {
+            changed = true;
             self.refresh_needed = false;
             if let Some(id) = &self.drill {
                 self.send(Request::ChangeFiles(id.clone(), self.tab))?;
@@ -559,6 +569,7 @@ impl App {
                 self.send(Request::Load(self.tab, self.limit))?;
             }
         } else if !self.busy && (self.history_more_requested || self.history_page_needed()) {
+            changed = true;
             self.history_more_requested = false;
             self.history_scroll_requested = false;
             if let Some(cursor) = self.view.history.as_ref().and_then(|p| p.next) {
@@ -579,6 +590,7 @@ impl App {
             && self.detail_needed
             && self.selection_changed.elapsed() >= Duration::from_millis(100)
         {
+            changed = true;
             self.detail_needed = false;
             if let Some(item) = self.current() {
                 let key = self.current_key();
@@ -588,7 +600,33 @@ impl App {
                 self.detail.clear();
             }
         }
-        Ok(())
+        Ok(changed)
+    }
+    /// Deadline for deferred work; worker completion has its own wake message.
+    pub fn next_wake(&self) -> Duration {
+        let mut wait = Duration::from_millis(250);
+        if self.busy || self.external_edit.is_some() || self.client_draft.is_some() {
+            return wait;
+        }
+        if self.refresh_needed {
+            return Duration::ZERO;
+        }
+        if self.detail_needed {
+            wait = wait
+                .min(Duration::from_millis(100).saturating_sub(self.selection_changed.elapsed()));
+        }
+        if self.config.refresh_seconds > 0
+            && !self.tab.is_history()
+            && self.drill.is_none()
+            && self.popup.is_none()
+            && !self.searching
+        {
+            wait = wait.min(
+                Duration::from_secs(self.config.refresh_seconds)
+                    .saturating_sub(self.last_refresh.elapsed()),
+            );
+        }
+        wait
     }
     fn apply_history_page(&mut self, mut page: View, append: bool) {
         self.history_paging_blocked = false;
@@ -1399,6 +1437,28 @@ mod tests {
         assert_eq!(app.current().unwrap().key(), "//depot/offline_file000");
         app.key(key('k')).unwrap();
         assert_eq!(app.current().unwrap().key(), "//depot/opened_file001");
+    }
+    #[test]
+    fn idle_ticks_do_not_request_rendering_and_deferred_work_has_a_deadline() {
+        let mut app = App::for_view(
+            Config {
+                refresh_seconds: 0,
+                ..Config::default()
+            },
+            View::default(),
+        );
+        app.detail_needed = false;
+        for _ in 0..10 {
+            assert!(!app.tick().unwrap());
+        }
+        assert_eq!(app.next_wake(), Duration::from_millis(250));
+        app.detail_needed = true;
+        app.selection_changed = Instant::now();
+        assert!(app.next_wake() <= Duration::from_millis(100));
+        app.selection_changed -= Duration::from_secs(1);
+        assert_eq!(app.next_wake(), Duration::ZERO);
+        assert!(app.tick().unwrap());
+        assert!(!app.tick().unwrap());
     }
     #[test]
     fn automatic_refresh_does_not_queue_a_second_scan_while_loading() {

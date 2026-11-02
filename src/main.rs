@@ -2,13 +2,20 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyEventKind, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use p4ui::{app::App, config::Config, model::Tab, p4::Connection, ui};
+use p4ui::{
+    app::App,
+    config::Config,
+    events::{EventReader, Wake},
+    model::Tab,
+    p4::Connection,
+    ui,
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
@@ -17,8 +24,8 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
-    time::Duration,
 };
 
 #[derive(Parser, Debug)]
@@ -179,50 +186,78 @@ fn run() -> Result<()> {
     }
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut app = App::new(config, connection);
+    let (wake, events) = mpsc::channel();
+    let reader = EventReader::new(wake.clone());
+    let mut app = App::with_wake(config, connection, Some(wake));
+    let mut size = terminal.size()?;
+    app.set_history_rows(ui::list_rows(size.height));
+    let mut dirty = true;
     if args.tab != Tab::Status {
         app.switch_tab(args.tab);
     }
     while !app.quit {
-        let size = terminal.size()?;
-        app.set_history_rows(ui::list_rows(size.height));
-        app.tick()?;
+        // Some PTYs do not deliver SIGWINCH to the child. A cheap size check
+        // also handles these terminals without redrawing an unchanged screen.
+        let current_size = terminal.size()?;
+        if current_size != size {
+            size = current_size;
+            app.set_history_rows(ui::list_rows(size.height));
+            dirty = true;
+        }
+        dirty |= app.tick()?;
         if shutdown.load(Ordering::Relaxed) && !app.mutating {
             break;
         }
         if let Some(edit) = app.external_edit.take() {
+            let paused = reader.pause();
             drop(guard);
             let result = run_editor(edit.path());
             guard = TerminalGuard::enter()?;
             terminal.clear()?;
             app.editor_finished(edit, result);
+            drop(paused);
+            size = terminal.size()?;
+            app.set_history_rows(ui::list_rows(size.height));
+            dirty = true;
         }
-        terminal.draw(|f| ui::draw(f, &mut app))?;
-        if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key)
-                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
-                {
-                    app.key(key)?
-                }
-                Event::Paste(text) => app.paste(&text),
-                Event::Mouse(mouse)
-                    if mouse.row >= 3 && mouse.row < size.height.saturating_sub(3) =>
-                {
-                    match mouse.kind {
-                        MouseEventKind::ScrollDown => app.scroll(
-                            3,
-                            u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
-                        ),
-                        MouseEventKind::ScrollUp => app.scroll(
-                            -3,
-                            u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
-                        ),
-                        _ => {}
+        if dirty {
+            terminal.draw(|f| ui::draw(f, &mut app))?;
+            dirty = false;
+        }
+        match events.recv_timeout(app.next_wake()) {
+            Ok(Wake::Terminal(input)) => {
+                dirty = true;
+                match input? {
+                    Event::Resize(_, _) => {
+                        size = terminal.size()?;
+                        app.set_history_rows(ui::list_rows(size.height));
                     }
+                    Event::Key(key)
+                        if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+                    {
+                        app.key(key)?
+                    }
+                    Event::Paste(text) => app.paste(&text),
+                    Event::Mouse(mouse)
+                        if mouse.row >= 3 && mouse.row < size.height.saturating_sub(3) =>
+                    {
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => app.scroll(
+                                3,
+                                u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
+                            ),
+                            MouseEventKind::ScrollUp => app.scroll(
+                                -3,
+                                u32::from(mouse.column) < u32::from(size.width) * 42 / 100,
+                            ),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            Ok(Wake::Worker) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     terminal.show_cursor()?;

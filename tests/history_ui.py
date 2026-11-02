@@ -81,7 +81,10 @@ else: raise AssertionError('Unexpected P4 command: '+repr(args))
             assert maximum(calls()[0]) == 28, "36-row terminal has 28 visible list rows"
             assert calls()[0][-1] == "..."
             assert b"100000000" in captured
+            pump(0.3)
+            idle_bytes = len(captured)
             pump(1.2)
+            assert len(captured) == idle_bytes, "Idle UI must not keep redrawing the terminal"
             assert len(calls()) == 1, "Idle history must not poll or prefetch"
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 140, 0, 0))
             wait_for(2, "resize")

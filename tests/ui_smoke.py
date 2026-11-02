@@ -32,7 +32,11 @@ def main():
         port = f"rsh:{daemon} -r {server} -L {server}/log -i"
         env = {k: v for k, v in os.environ.items() if not k.startswith("P4")}
         editor = root / "editor.py"
+        editor_input = root / "editor-input"
+        editor_received = root / "editor-received"
         editor.write_text("import pathlib,sys\np=pathlib.Path(sys.argv[1])\n"
+                          f"marker=pathlib.Path({str(editor_input)!r})\n"
+                          f"if marker.exists():\n pathlib.Path({str(editor_received)!r}).write_text(sys.stdin.readline());marker.unlink()\n"
                           "if p.suffix=='.p4s': p.write_text(p.read_text().replace('initial spec', 'edited through p4ui'))\n")
         env.update(P4CONFIG=".p4ui-no-config", P4ENVIRO=str(root / "env"),
                    P4TICKETS=str(root / "tickets"), P4TRUST=str(root / "trust"),
@@ -99,8 +103,12 @@ def main():
             assert b"Command result" in result, result[-1000:]
             send(b"\r")
             # Open configured editor on a file and restore the TUI.
-            result = send(b"o", 0.8)
-            assert b"\x1b[?1049l" in result and b"\x1b[?1049h" in result
+            editor_input.touch()
+            result = send(b"o", 0.4)
+            assert b"\x1b[?1049l" in result
+            result = send(b"editor stdin check\n", 0.8)
+            assert b"\x1b[?1049h" in result
+            assert editor_received.read_text() == "editor stdin check\n", "UI consumed editor keystrokes"
             send(b"c")
             send(b"First submit through p4ui")
             send(b"\x13")  # Ctrl-S accepts multiline input.
