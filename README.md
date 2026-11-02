@@ -71,6 +71,8 @@ Run from a clean, synchronized default branch after pushing source changes. The 
 
 Nonfatal workspace scan warnings appear in the status bar; press `?` to read their full messages. Usable files remain available, and warnings identify potentially incomplete results. Authentication errors and failed commands still stop the request.
 
+The UI draws after input, resize, or background results, and formats only visible rows and diff lines. Rapid tab selections coalesce before starting a load. Status and Resolve reload workspace data on return; other tab listings and read-only depot/spec previews can reuse results for up to 10 seconds. Read caches have a 2 MiB listing budget and a 1 MiB preview budget. `r` / F5 bypasses the caches, and mutations, workspace changes, and editor handoffs invalidate them. Mutations check the current workspace identity again before running.
+
 The result of a failed submit can be a newly numbered pending changelist. Refresh and inspect Changes before retrying. Timeouts and interrupted network operations also require inspection; server changes are not assumed to be rolled back.
 
 ## Keys

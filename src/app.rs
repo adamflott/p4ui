@@ -55,12 +55,13 @@ pub enum Popup {
 }
 
 enum Request {
+    Invalidate,
     History(Tab, Option<HistoryCursor>, usize, u64),
     Load(Tab, usize),
     ChangeFiles(String, Tab),
     Detail(String, Detail),
-    Act(Action),
-    Edit(FileEntry, String),
+    Act(Action, Info),
+    Edit(FileEntry, String, Info),
     ClientSpec,
 }
 enum Response {
@@ -125,10 +126,26 @@ impl Worker {
         let cancel = connection.cancelled.clone();
         let handle = thread::spawn(move || {
             let mut history_context: Option<(u64, crate::p4::HistoryContext)> = None;
+            let mut cache = crate::read_cache::ReadCache::default();
             while let Ok(job) = jobs.recv() {
                 let result = match job {
+                    Request::Invalidate => {
+                        cache.clear();
+                        history_context = None;
+                        continue;
+                    }
                     Request::History(tab, cursor, size, epoch) => {
                         let result = (|| {
+                            if cursor.is_none()
+                                && connection.history_max_scan_rows == 0
+                                && let Some(view) = cache.view(tab, size)
+                            {
+                                history_context = Some((
+                                    epoch,
+                                    connection.history_context_with_info(view.info.clone()),
+                                ));
+                                return Ok(view);
+                            }
                             // Reuse connection metadata within a browsing session.
                             // Explicit overrides must recheck current admin limits.
                             if connection.history_max_scan_rows != 0
@@ -136,8 +153,15 @@ impl Worker {
                                     .as_ref()
                                     .is_none_or(|(generation, _)| *generation != epoch)
                             {
-                                let (context, view) =
-                                    connection.start_history(tab, cursor, size)?;
+                                let (context, view) = connection.start_history_with_info(
+                                    tab,
+                                    cursor,
+                                    size,
+                                    cache.info(),
+                                )?;
+                                if cursor.is_none() {
+                                    cache.put_view(tab, size, &view);
+                                }
                                 history_context = Some((epoch, context));
                                 return Ok(view);
                             }
@@ -146,38 +170,79 @@ impl Worker {
                                 .context("Missing history connection")?;
                             connection.history_page(tab, cursor, size, context)
                         })();
+                        if result.is_err() {
+                            cache.clear();
+                        }
                         Response::History(tab, cursor, epoch, result)
                     }
-                    Request::Load(tab, limit) => Response::Load(tab, connection.load(tab, limit)),
+                    Request::Load(tab, limit) => {
+                        let result = if let Some(view) = cache.view(tab, limit) {
+                            Ok(view)
+                        } else {
+                            connection
+                                .load_with_info(tab, limit, cache.info())
+                                .inspect(|view| cache.put_view(tab, limit, view))
+                        };
+                        if result.is_err() {
+                            cache.clear();
+                        }
+                        Response::Load(tab, result)
+                    }
                     Request::ChangeFiles(id, tab) => {
                         Response::ChangeFiles(id.clone(), tab, connection.change_files(&id, tab))
                     }
                     Request::Detail(key, detail) => {
-                        Response::Detail(key, connection.detail(detail))
+                        let reusable = matches!(&detail, Detail::Item(item, tab)
+                            if !matches!(tab, Tab::Status | Tab::Resolve) && !matches!(item, Item::File(f) if f.opened));
+                        let result = if reusable && let Some(text) = cache.detail(&key) {
+                            Ok(text)
+                        } else {
+                            connection.detail(detail).inspect(|text| {
+                                if reusable {
+                                    cache.put_detail(key.clone(), text);
+                                }
+                            })
+                        };
+                        if result.is_err() {
+                            cache.clear();
+                        }
+                        Response::Detail(key, result)
                     }
-                    Request::Act(action) => {
-                        let result = connection.act(action.clone());
+                    Request::Act(action, expected) => {
+                        cache.clear();
+                        history_context = None;
+                        let result = check_workspace(&connection, &expected)
+                            .and_then(|()| connection.act(action.clone()));
                         Response::Act(action, result)
                     }
-                    Request::Edit(file, target) => Response::Edit((|| {
-                        let meta = std::fs::symlink_metadata(&file.local)?;
-                        anyhow::ensure!(
-                            meta.is_file(),
-                            "Only regular local files can be opened in an editor"
-                        );
-                        if !file.opened {
-                            connection.act(if file.action == "add" {
-                                Action::Reconcile(Some(file.clone()), target)
-                            } else {
-                                Action::Edit(file.clone(), target)
-                            })?;
-                        }
-                        Ok(std::path::PathBuf::from(file.local))
-                    })()),
-                    Request::ClientSpec => Response::ClientSpec((|| {
-                        let (name, form) = connection.client_spec()?;
-                        ExternalEdit::client_spec(name, form)
-                    })()),
+                    Request::Edit(file, target, expected) => {
+                        cache.clear();
+                        history_context = None;
+                        Response::Edit((|| {
+                            check_workspace(&connection, &expected)?;
+                            let meta = std::fs::symlink_metadata(&file.local)?;
+                            anyhow::ensure!(
+                                meta.is_file(),
+                                "Only regular local files can be opened in an editor"
+                            );
+                            if !file.opened {
+                                connection.act(if file.action == "add" {
+                                    Action::Reconcile(Some(file.clone()), target)
+                                } else {
+                                    Action::Edit(file.clone(), target)
+                                })?;
+                            }
+                            Ok(std::path::PathBuf::from(file.local))
+                        })())
+                    }
+                    Request::ClientSpec => {
+                        cache.clear();
+                        history_context = None;
+                        Response::ClientSpec((|| {
+                            let (name, form) = connection.client_spec()?;
+                            ExternalEdit::client_spec(name, form)
+                        })())
+                    }
                 };
                 if results.send(result).is_err() {
                     break;
@@ -252,6 +317,7 @@ pub struct App {
     selection_changed: Instant,
     row_cache: RefCell<crate::view_cache::Rows>,
     detail_index: RefCell<crate::view_cache::Lines>,
+    tab_load_after: Option<Instant>,
 }
 impl App {
     pub fn new(config: Config, connection: Connection) -> Self {
@@ -304,6 +370,7 @@ impl App {
             selection_changed: Instant::now(),
             row_cache: RefCell::default(),
             detail_index: RefCell::default(),
+            tab_load_after: None,
         }
     }
     pub fn visible(&self) -> Vec<&Item> {
@@ -574,7 +641,13 @@ impl App {
         {
             self.refresh_needed = true;
         }
-        if !self.busy && self.refresh_needed {
+        if !self.busy
+            && self.refresh_needed
+            && self
+                .tab_load_after
+                .is_none_or(|deadline| Instant::now() >= deadline)
+        {
+            self.tab_load_after = None;
             changed = true;
             self.refresh_needed = false;
             if let Some(id) = &self.drill {
@@ -593,6 +666,10 @@ impl App {
             } else {
                 self.send(Request::Load(self.tab, self.limit))?;
             }
+        } else if self.refresh_needed {
+            // A newer tab selection supersedes the deferred load, without
+            // launching obsolete detail/history work during the debounce.
+            return Ok(changed);
         } else if !self.busy && (self.history_more_requested || self.history_page_needed()) {
             changed = true;
             self.history_more_requested = false;
@@ -635,7 +712,12 @@ impl App {
             return wait;
         }
         if self.refresh_needed {
-            return Duration::ZERO;
+            return self
+                .tab_load_after
+                .map_or(Duration::ZERO, |deadline| {
+                    deadline.saturating_duration_since(Instant::now())
+                })
+                .min(wait);
         }
         if self.detail_needed {
             wait = wait
@@ -771,6 +853,7 @@ impl App {
         }
         self.focus_detail = false;
         self.refresh_needed = true;
+        self.tab_load_after = Some(Instant::now() + Duration::from_millis(120));
         self.selection_updated();
     }
     fn capture_status_state(&self) -> StatusState {
@@ -849,7 +932,7 @@ impl App {
         }
         self.status = "Running Perforce command…".into();
         self.mutating = true;
-        self.send(Request::Act(action))
+        self.send(Request::Act(action, self.view.info.clone()))
     }
     pub fn key(&mut self, key: KeyEvent) -> Result<()> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -960,7 +1043,7 @@ impl App {
                 }
             }
             KeyCode::F(1) => self.popup = Some(Popup::Help),
-            KeyCode::F(5) => self.refresh_needed = true,
+            KeyCode::F(5) => self.refresh(),
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 self.switch_tab(Tab::ALL[c as usize - '1' as usize])
             }
@@ -1069,7 +1152,7 @@ impl App {
         } else if bound("help") {
             self.popup = Some(Popup::Help);
         } else if bound("refresh") {
-            self.refresh_needed = true;
+            self.refresh();
         } else if bound("search") {
             self.searching = true;
         } else if bound("up") {
@@ -1124,7 +1207,11 @@ impl App {
                     if bound("open") {
                         if !self.busy {
                             self.mutating = true;
-                            self.send(Request::Edit(f, self.target.clone()))?;
+                            self.send(Request::Edit(
+                                f,
+                                self.target.clone(),
+                                self.view.info.clone(),
+                            ))?;
                         }
                     } else if bound("reconcile") || c == ' ' {
                         self.act(if f.opened {
@@ -1326,6 +1413,10 @@ This may replace target content. Inspect the pending change before submitting.",
         }
     }
     pub fn refresh(&mut self) {
+        if let Some(worker) = &self.worker {
+            let _ = worker.send.send(Request::Invalidate);
+        }
+        self.tab_load_after = None;
         self.refresh_needed = true;
     }
     pub fn editor_error(&mut self, error: String) {
@@ -1370,7 +1461,7 @@ This may replace target content. Inspect the pending change before submitting.",
                 }
             }
         }
-        self.refresh_needed = true;
+        self.refresh();
     }
     pub fn paste(&mut self, text: &str) {
         if let Some(Popup::Input { kind, value }) = &mut self.popup {
@@ -1406,6 +1497,16 @@ fn preserve_draft(path: tempfile::TempPath) -> String {
             )
         }
     }
+}
+
+fn check_workspace(connection: &Connection, expected: &Info) -> Result<()> {
+    if !expected.client.is_empty() {
+        anyhow::ensure!(
+            connection.info()? == *expected,
+            "Workspace identity changed since this view was loaded. Refresh and review the workspace before retrying."
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1503,6 +1604,31 @@ mod tests {
         assert!(!app.tick().unwrap());
     }
     #[test]
+    fn rapid_tab_selection_coalesces_before_starting_a_backend_request() {
+        let mut app = App::for_view(Config::default(), View::default());
+        let (send, requests) = mpsc::channel();
+        let (_responses, receive) = mpsc::channel();
+        app.worker = Some(Worker {
+            send,
+            receive,
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        });
+        for tab in [Tab::Log, Tab::Labels, Tab::Files] {
+            app.switch_tab(tab);
+            assert!(!app.tick().unwrap());
+            assert!(requests.try_recv().is_err());
+            assert!(app.next_wake() > Duration::ZERO);
+        }
+        app.tab_load_after = Some(Instant::now() - Duration::from_secs(1));
+        assert!(app.tick().unwrap());
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Request::Load(Tab::Files, _)
+        ));
+        assert!(requests.try_recv().is_err());
+    }
+    #[test]
     fn automatic_refresh_does_not_queue_a_second_scan_while_loading() {
         let mut app = App::for_view(Config::default(), status_view(2, 2));
         let (send, requests) = mpsc::channel();
@@ -1534,12 +1660,14 @@ mod tests {
         );
         // A manual refresh requested while a scan is busy still runs once.
         app.refresh();
+        assert!(matches!(requests.try_recv().unwrap(), Request::Invalidate));
         app.tick().unwrap();
         assert!(matches!(
             requests.try_recv().unwrap(),
             Request::Load(Tab::Status, _)
         ));
         app.refresh();
+        assert!(matches!(requests.try_recv().unwrap(), Request::Invalidate));
         responses
             .send(Response::Load(Tab::Status, Ok(status_view(2, 2))))
             .unwrap();

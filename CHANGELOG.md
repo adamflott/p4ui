@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Recent tab listings, previews, and connection metadata use bounded 10-second read caches; rapid tab selections coalesce, explicit refreshes bypass caches, and mutations verify current workspace identity.
 - Status requests only required `fstat` fields, streams JSON records into file entries, and sorts/deduplicates without cloning path keys.
 - Lists format only their visible rows, reuse filter/pane indices, and index diff lines sparsely to bound rendering work and temporary memory.
 - The UI redraws only after state changes, with worker notifications and scheduled deadlines; external editors retain exclusive terminal input.

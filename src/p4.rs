@@ -300,10 +300,22 @@ impl Connection {
         Ok((info.client, form))
     }
     pub fn load(&self, tab: Tab, limit: usize) -> Result<View> {
+        self.load_with_info(tab, limit, None)
+    }
+    pub(crate) fn load_with_info(
+        &self,
+        tab: Tab,
+        limit: usize,
+        cached: Option<Info>,
+    ) -> Result<View> {
         if matches!(tab, Tab::Status | Tab::Resolve) {
-            return self.workspace_status(tab);
+            return self.workspace_status(tab, cached);
         }
-        let info = self.info()?;
+        let info = if let Some(info) = cached {
+            info
+        } else {
+            self.info()?
+        };
         let mut view = View {
             info,
             ..View::default()
@@ -396,9 +408,15 @@ impl Connection {
         }
         Ok(view)
     }
-    fn workspace_status(&self, tab: Tab) -> Result<View> {
+    fn workspace_status(&self, tab: Tab, cached: Option<Info>) -> Result<View> {
         thread::scope(|scope| {
-            let info = scope.spawn(|| self.info());
+            let info = scope.spawn(|| {
+                if let Some(info) = cached {
+                    Ok(info)
+                } else {
+                    self.info()
+                }
+            });
             let opened = scope.spawn(|| {
                 let mut warnings = Vec::new();
                 let rows = self.listing_files(
@@ -471,9 +489,22 @@ impl Connection {
         cursor: Option<HistoryCursor>,
         size: usize,
     ) -> Result<(HistoryContext, View)> {
-        if self.history_max_scan_rows != 0 {
+        self.start_history_with_info(tab, cursor, size, None)
+    }
+    pub(crate) fn start_history_with_info(
+        &self,
+        tab: Tab,
+        cursor: Option<HistoryCursor>,
+        size: usize,
+        cached: Option<Info>,
+    ) -> Result<(HistoryContext, View)> {
+        if self.history_max_scan_rows != 0 || cached.is_some() {
             // Group limits depend on the authenticated user returned by info.
-            let context = self.history_context_with_info(self.info()?);
+            let context = self.history_context_with_info(if let Some(info) = cached {
+                info
+            } else {
+                self.info()?
+            });
             let view = self.history_page(tab, cursor, size, &context)?;
             return Ok((context, view));
         }
@@ -488,7 +519,7 @@ impl Connection {
             Ok((context, view))
         })
     }
-    fn history_context_with_info(&self, info: Info) -> HistoryContext {
+    pub(crate) fn history_context_with_info(&self, info: Info) -> HistoryContext {
         let mut context = HistoryContext {
             info,
             scan_limit: None,
@@ -1405,28 +1436,28 @@ mod tests {
         }
         assert!(validate_change("default", false).is_err());
     }
-}
-#[test]
-fn streamed_file_rows_preserve_warnings_and_reject_late_errors() {
-    let input = "{\"depotFile\":\"//depot/λ\",\"type\":\"text\",\"unresolved\":\"1\"}\n{\"severity\":2,\"data\":\"partial listing warning\"}\n";
-    let mut warnings = Vec::new();
-    let files = parse_listing_reader(
-        BufReader::with_capacity(7, input.as_bytes()),
-        &mut warnings,
-        |record| {
-            record
-                .get("depotFile")
-                .is_some()
-                .then(|| file(&record, true))
-        },
-    )
-    .unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].depot, "//depot/λ");
-    assert!(files[0].opened && files[0].unresolved);
-    assert_eq!(warnings, ["partial listing warning"]);
-    let failed = format!("{input}{{\"severity\":3,\"data\":\"Permission denied\"}}\n");
-    assert!(parse_listing_reader(failed.as_bytes(), &mut Vec::new(), Some).is_err());
-    let invalid = format!("{input}invalid JSON\n");
-    assert!(parse_listing_reader(invalid.as_bytes(), &mut Vec::new(), Some).is_err());
+    #[test]
+    fn streamed_file_rows_preserve_warnings_and_reject_late_errors() {
+        let input = "{\"depotFile\":\"//depot/λ\",\"type\":\"text\",\"unresolved\":\"1\"}\n{\"severity\":2,\"data\":\"partial listing warning\"}\n";
+        let mut warnings = Vec::new();
+        let files = parse_listing_reader(
+            BufReader::with_capacity(7, input.as_bytes()),
+            &mut warnings,
+            |record| {
+                record
+                    .get("depotFile")
+                    .is_some()
+                    .then(|| file(&record, true))
+            },
+        )
+        .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].depot, "//depot/λ");
+        assert!(files[0].opened && files[0].unresolved);
+        assert_eq!(warnings, ["partial listing warning"]);
+        let failed = format!("{input}{{\"severity\":3,\"data\":\"Permission denied\"}}\n");
+        assert!(parse_listing_reader(failed.as_bytes(), &mut Vec::new(), Some).is_err());
+        let invalid = format!("{input}invalid JSON\n");
+        assert!(parse_listing_reader(invalid.as_bytes(), &mut Vec::new(), Some).is_err());
+    }
 }

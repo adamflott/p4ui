@@ -336,6 +336,110 @@ fn drive_app(app: &mut p4ui::app::App, ready: impl Fn(&p4ui::app::App) -> bool) 
         std::thread::sleep(Duration::from_millis(15));
     }
 }
+fn cached_reads_fake() -> Result<(tempfile::TempDir, Connection)> {
+    fake(
+        r#"import json,pathlib,sys
+args=sys.argv[1:];root=pathlib.Path(__file__).parent
+with root.joinpath('calls').open('a') as f: f.write(json.dumps(args)+'\n')
+if 'info' in args:
+ print(json.dumps({'userName':'tester','clientName':'other' if root.joinpath('other').exists() else 'test','clientRoot':'/workspace'}))
+elif 'changes' in args:
+ print(json.dumps({'change':'100','desc':'Example','user':'tester','client':'test','status':'submitted'}))
+elif 'describe' in args: print('Summary')
+elif 'labels' in args: pass
+elif 'sync' in args: print(json.dumps({'data':'Sync completed'}))
+else: raise AssertionError('Unexpected command: '+repr(args))
+"#,
+    )
+}
+fn cached_calls(dir: &std::path::Path, command: &str) -> usize {
+    std::fs::read_to_string(dir.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(&format!("\"{command}\"")))
+        .count()
+}
+#[test]
+fn recent_tab_reads_and_details_are_reused_but_manual_refresh_is_fresh() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{app::App, model::Tab};
+    let (dir, connection) = cached_reads_fake()?;
+    let mut app = App::new(
+        Config {
+            refresh_seconds: 0,
+            ..Config::default()
+        },
+        connection,
+    );
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    app.switch_tab(Tab::Labels);
+    drive_app(&mut app, |app| {
+        !app.busy && app.status.starts_with("0 items")
+    })?;
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    for command in ["info", "changes", "describe", "labels"] {
+        assert_eq!(
+            cached_calls(dir.path(), command),
+            1,
+            "Unexpected {command} reload"
+        );
+    }
+    app.refresh();
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    for command in ["info", "changes", "describe"] {
+        assert_eq!(
+            cached_calls(dir.path(), command),
+            2,
+            "Manual refresh reused {command}"
+        );
+    }
+    app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))?;
+    app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?;
+    drive_app(&mut app, |app| {
+        !app.busy && !app.mutating && app.popup.is_some()
+    })?;
+    assert_eq!(cached_calls(dir.path(), "sync"), 1);
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.switch_tab(Tab::Labels);
+    drive_app(&mut app, |app| {
+        !app.busy && app.status.starts_with("0 items")
+    })?;
+    assert_eq!(
+        cached_calls(dir.path(), "labels"),
+        2,
+        "Mutation retained an old cached listing"
+    );
+    Ok(())
+}
+#[test]
+fn cached_views_cannot_authorize_a_mutation_in_a_changed_workspace() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use p4ui::{
+        app::{App, Popup},
+        model::Tab,
+    };
+    let (dir, connection) = cached_reads_fake()?;
+    let mut app = App::new(
+        Config {
+            refresh_seconds: 0,
+            ..Config::default()
+        },
+        connection,
+    );
+    app.switch_tab(Tab::Log);
+    drive_app(&mut app, |app| !app.busy && app.detail == "Summary\n")?;
+    std::fs::write(dir.path().join("other"), "changed")?;
+    app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))?;
+    app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?;
+    drive_app(&mut app, |app| app.popup.is_some() && !app.mutating)?;
+    assert!(
+        matches!(&app.popup, Some(Popup::Message { text, .. }) if text.contains("Workspace identity changed"))
+    );
+    assert_eq!(cached_calls(dir.path(), "sync"), 0);
+    Ok(())
+}
 fn history_queries(path: &std::path::Path) -> Result<Vec<Vec<String>>> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let calls: Vec<Vec<String>> = text
