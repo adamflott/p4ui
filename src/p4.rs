@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    io::{ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -106,6 +106,9 @@ impl Connection {
     }
     /// Tempfiles drain output without pipe deadlocks and bound memory consumption.
     pub fn execute(&self, args: &[&str], form: Option<&str>, json: bool) -> Result<String> {
+        read_output(self.execute_file(args, form, json)?)
+    }
+    fn execute_file(&self, args: &[&str], form: Option<&str>, json: bool) -> Result<std::fs::File> {
         let _permit = self.processes.acquire(&self.cancelled)?;
         let mut out = tempfile::tempfile()?;
         let mut err = tempfile::tempfile()?;
@@ -179,35 +182,48 @@ impl Connection {
             out.metadata()?.len() + err.metadata()?.len() <= self.max_output,
             "p4 output limit exceeded; narrow your scope or raise max_output_mb"
         );
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
         out.rewind()?;
-        err.rewind()?;
-        out.read_to_end(&mut stdout)?;
-        err.read_to_end(&mut stderr)?;
-        let stdout = String::from_utf8_lossy(&stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&stderr);
-        if !status.success() && !json {
-            bail!("p4 {}: {}{}", args.first().unwrap_or(&""), stdout, stderr);
-        }
-        if !status.success() && (stdout.trim().is_empty() || !stderr.trim().is_empty()) {
-            bail!("p4 {}: {}{}", args.first().unwrap_or(&""), stdout, stderr);
-        }
         if !status.success() {
-            if json {
-                parse_records(&stdout)?;
+            err.rewind()?;
+            let stdout = read_output(out)?;
+            let stderr = read_output(err)?;
+            if !json || stdout.trim().is_empty() || !stderr.trim().is_empty() {
+                bail!("p4 {}: {}{}", args.first().unwrap_or(&""), stdout, stderr);
             }
+            parse_records(&stdout)?;
             bail!("p4 exited with {status}: {stdout}{stderr}");
         }
-        Ok(stdout)
+        Ok(out)
     }
     pub fn records(&self, args: &[&str]) -> Result<Vec<Value>> {
-        let text = self.execute(args, None, true)?;
-        parse_records(&text)
+        let mut warnings = Vec::new();
+        let records = self.listing_records(args, &mut warnings)?;
+        ensure!(warnings.is_empty(), "p4 warning: {}", warnings.join("\n"));
+        Ok(records)
     }
     fn listing_records(&self, args: &[&str], warnings: &mut Vec<String>) -> Result<Vec<Value>> {
-        let text = self.execute(args, None, true)?;
-        parse_listing_records(&text, warnings)
+        parse_listing_reader(
+            BufReader::new(self.execute_file(args, None, true)?),
+            warnings,
+            Some,
+        )
+    }
+    fn listing_files(
+        &self,
+        args: &[&str],
+        warnings: &mut Vec<String>,
+        opened: bool,
+    ) -> Result<Vec<FileEntry>> {
+        parse_listing_reader(
+            BufReader::new(self.execute_file(args, None, true)?),
+            warnings,
+            |record| {
+                record
+                    .get("depotFile")
+                    .is_some()
+                    .then(|| file(&record, opened))
+            },
+        )
     }
     pub fn text(&self, args: &[&str]) -> Result<String> {
         self.execute(args, None, false)
@@ -385,14 +401,28 @@ impl Connection {
             let info = scope.spawn(|| self.info());
             let opened = scope.spawn(|| {
                 let mut warnings = Vec::new();
-                let rows = self.listing_records(&["fstat", "-Ro", "-Or", "..."], &mut warnings)?;
+                let rows = self.listing_files(
+                    &[
+                        "fstat",
+                        "-Ro",
+                        "-Or",
+                        "-T",
+                        "depotFile,clientFile,action,change,type,headAction,headType,unresolved",
+                        "...",
+                    ],
+                    &mut warnings,
+                    true,
+                )?;
                 Ok((rows, warnings))
             });
             let offline = (tab == Tab::Status).then(|| {
                 scope.spawn(|| {
                     let mut warnings = Vec::new();
-                    let rows =
-                        self.listing_records(&["reconcile", "-n", "-f", "..."], &mut warnings)?;
+                    let rows = self.listing_files(
+                        &["reconcile", "-n", "-f", "..."],
+                        &mut warnings,
+                        false,
+                    )?;
                     Ok((rows, warnings))
                 })
             });
@@ -408,32 +438,25 @@ impl Connection {
                 warnings,
                 ..Default::default()
             };
-            for record in opened
-                .iter()
-                .filter(|record| record.get("depotFile").is_some())
-            {
-                let file = file(record, true);
+            for file in opened {
                 if tab == Tab::Status || file.unresolved {
                     view.items.push(Item::File(file));
                 }
             }
-            if let Some((records, warnings)) = offline? {
+            if let Some((mut files, warnings)) = offline? {
                 view.warnings.extend(warnings);
-                let known: HashSet<String> = view
-                    .items
-                    .iter()
-                    .map(|item| item.key().to_owned())
-                    .collect();
-                for record in records {
-                    if record.get("depotFile").is_some()
-                        && !known.contains(&field(&record, "depotFile"))
-                    {
-                        view.items.push(Item::File(file(&record, false)));
-                    }
-                }
-                view.items.sort_by_key(|item| match item {
-                    Item::File(file) => (!file.opened, file.change.clone(), file.depot.clone()),
-                    _ => (false, String::new(), String::new()),
+                let known: HashSet<&str> = view.items.iter().map(Item::key).collect();
+                files.retain(|file| !known.contains(file.depot.as_str()));
+                drop(known);
+                view.items.extend(files.into_iter().map(Item::File));
+                view.items.sort_by(|left, right| match (left, right) {
+                    (Item::File(left), Item::File(right)) => (
+                        !left.opened,
+                        &left.change,
+                        &left.depot,
+                    )
+                        .cmp(&(!right.opened, &right.change, &right.depot)),
+                    _ => std::cmp::Ordering::Equal,
                 });
             }
             Ok(view)
@@ -1117,10 +1140,25 @@ pub fn parse_records(text: &str) -> Result<Vec<Value>> {
     Ok(records)
 }
 fn parse_listing_records(text: &str, warnings: &mut Vec<String>) -> Result<Vec<Value>> {
+    parse_listing_reader(text.as_bytes(), warnings, Some)
+}
+fn parse_listing_reader<T>(
+    mut reader: impl BufRead,
+    warnings: &mut Vec<String>,
+    mut convert: impl FnMut(Value) -> Option<T>,
+) -> Result<Vec<T>> {
     let mut records = Vec::new();
     let mut errors = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let r: Value = serde_json::from_str(line)
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let r: Value = serde_json::from_str(&line)
             .context("Invalid JSON from p4 (requires a client supporting -Mj)")?;
         let severity = field(&r, "severity").parse::<u32>().unwrap_or(0);
         let generic = field(&r, "generic").parse::<u32>().unwrap_or(0);
@@ -1131,11 +1169,19 @@ fn parse_listing_records(text: &str, warnings: &mut Vec<String>) -> Result<Vec<V
         } else if severity == 2 {
             warnings.push(field(&r, "data").trim_end().to_string());
         } else {
-            records.push(r);
+            if let Some(record) = convert(r) {
+                records.push(record);
+            }
         }
     }
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     Ok(records)
+}
+fn read_output(mut file: std::fs::File) -> Result<String> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()))
 }
 fn validate_client_form(name: &str, form: &str) -> Result<()> {
     ensure!(
@@ -1359,4 +1405,28 @@ mod tests {
         }
         assert!(validate_change("default", false).is_err());
     }
+}
+#[test]
+fn streamed_file_rows_preserve_warnings_and_reject_late_errors() {
+    let input = "{\"depotFile\":\"//depot/λ\",\"type\":\"text\",\"unresolved\":\"1\"}\n{\"severity\":2,\"data\":\"partial listing warning\"}\n";
+    let mut warnings = Vec::new();
+    let files = parse_listing_reader(
+        BufReader::with_capacity(7, input.as_bytes()),
+        &mut warnings,
+        |record| {
+            record
+                .get("depotFile")
+                .is_some()
+                .then(|| file(&record, true))
+        },
+    )
+    .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].depot, "//depot/λ");
+    assert!(files[0].opened && files[0].unresolved);
+    assert_eq!(warnings, ["partial listing warning"]);
+    let failed = format!("{input}{{\"severity\":3,\"data\":\"Permission denied\"}}\n");
+    assert!(parse_listing_reader(failed.as_bytes(), &mut Vec::new(), Some).is_err());
+    let invalid = format!("{input}invalid JSON\n");
+    assert!(parse_listing_reader(invalid.as_bytes(), &mut Vec::new(), Some).is_err());
 }
